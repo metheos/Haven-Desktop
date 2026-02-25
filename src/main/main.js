@@ -223,7 +223,8 @@ function switchToServer(serverUrl) {
       return { action: 'deny' };
     });
 
-    if (IS_DEV) view.webContents.openDevTools({ mode: 'detach' });
+    // Only open DevTools for the first server view in dev mode
+    if (IS_DEV && serverViews.size === 0) view.webContents.openDevTools({ mode: 'detach' });
     serverViews.set(url, view);
   }
 
