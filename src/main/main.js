@@ -13,6 +13,12 @@ const { ServerManager }      = require('./server-manager');
 const { AudioCaptureManager } = require('./audio-capture');
 
 // ── Constants ─────────────────────────────────────────────
+// ── Enable native Wayland support (must be before app.whenReady) ──
+if (process.platform === 'linux') {
+  app.commandLine.appendSwitch('enable-features', 'UseOzonePlatform,WaylandWindowDecorations');
+  app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
+}
+
 const IS_DEV    = process.argv.includes('--dev');
 const SHOW_SERVER = process.argv.includes('--show-server');
 const ICON_PATH = path.join(__dirname, '..', '..', 'assets', 'icon.png');
@@ -60,16 +66,10 @@ else {
 // ═══════════════════════════════════════════════════════════
 
 app.on('certificate-error', (event, webContents, url, error, certificate, callback) => {
-  try {
-    const parsed = new URL(url);
-    const host   = parsed.hostname;
-    if (host === 'localhost' || host === '127.0.0.1' || host === '::1') {
-      event.preventDefault();
-      callback(true);  // accept the self-signed cert
-      return;
-    }
-  } catch { /* fall through */ }
-  callback(false);  // reject for non-local hosts
+  // Haven servers commonly use self-signed certs.
+  // Accept them so users can connect to LAN / remote servers without a blank screen.
+  event.preventDefault();
+  callback(true);
 });
 
 // ═══════════════════════════════════════════════════════════
@@ -285,7 +285,15 @@ function clearNotificationBadge() {
 function createTray() {
   let icon;
   try {
-    icon = nativeImage.createFromPath(ICON_PATH).resize({ width: 16, height: 16 });
+    const raw = nativeImage.createFromPath(ICON_PATH);
+    // Use platform-appropriate tray icon sizes to avoid blank/invisible icons on high DPI
+    if (process.platform === 'win32') {
+      icon = raw.resize({ width: 24, height: 24 });
+    } else if (process.platform === 'linux') {
+      icon = raw.resize({ width: 48, height: 48 });
+    } else {
+      icon = raw.resize({ width: 22, height: 22 }); // macOS template size
+    }
   } catch {
     return; // icon asset may not exist yet in dev
   }
