@@ -87,6 +87,15 @@ app.whenReady().then(async () => {
     if (wc && !wc.isDestroyed()) wc.send('server:log', msg);
   });
 
+  // Auto-grant camera, mic, and screen-share permissions for all server views
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+    const granted = ['media', 'mediaKeySystem', 'display-capture', 'notifications'].includes(permission);
+    callback(granted);
+  });
+  session.defaultSession.setPermissionCheckHandler((webContents, permission) => {
+    return ['media', 'mediaKeySystem', 'display-capture', 'notifications'].includes(permission);
+  });
+
   registerIPC();
   registerScreenShareHandler();
 
