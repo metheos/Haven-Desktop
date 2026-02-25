@@ -3,9 +3,12 @@
   "version": "1.0.0-beta.1",
   "description": "Haven Desktop — Private chat, reimagined for your desktop",
   "main": "src/main/main.js",
-  "author": "Haven Contributors",
+  "author": {
+    "name": "Haven Contributors",
+    "email": "help.havenapp@gmail.com"
+  },
   "license": "MIT-NC",
-  "homepage": "https://havenchat.io",
+  "homepage": "https://ancsemi.github.io/Haven/",
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
@@ -21,9 +24,9 @@
     "node-addon-api": "^8.3.0"
   },
   "devDependencies": {
+    "@electron/rebuild": "^3.7.1",
     "electron": "^33.2.0",
     "electron-builder": "^25.1.8",
-    "@electron/rebuild": "^3.7.1",
     "node-gyp": "^10.3.1"
   }
 }
