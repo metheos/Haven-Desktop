@@ -145,13 +145,19 @@
     }
 
     // Basic validation
+    let parsed;
     try {
-      new URL(url);
+      parsed = new URL(url);
     } catch {
       joinError.textContent   = 'Please enter a valid URL (e.g. https://haven.example.com)';
       joinError.style.display = 'block';
       return;
     }
+
+    // Strip to origin (protocol + host + port) — prevents double-path issues
+    // e.g. "https://174.49.177.46:3000/app" → "https://174.49.177.46:3000"
+    const serverUrl = parsed.origin;
+    urlInput.value = serverUrl;
 
     connectBtn.disabled    = true;
     connectBtn.textContent = 'Connecting…';
@@ -161,14 +167,19 @@
       const controller = new AbortController();
       const timeout    = setTimeout(() => controller.abort(), 8000);
 
-      const res = await fetch(url.replace(/\/+$/, '') + '/api/health', {
+      const res = await fetch(serverUrl + '/api/health', {
         signal: controller.signal,
       }).catch(() => null);
 
       clearTimeout(timeout);
 
-      const remember  = $('#chk-remember').checked;
-      const serverUrl = url.replace(/\/+$/, '');
+      if (!res || !res.ok) {
+        joinError.textContent = 'Could not reach the server. Make sure the address is correct and the server is running.';
+        joinError.style.display = 'block';
+        return;
+      }
+
+      const remember = $('#chk-remember').checked;
 
       await window.haven.settings.set('userPrefs', {
         mode: 'join',

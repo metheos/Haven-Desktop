@@ -4,7 +4,7 @@
 
 const {
   app, BrowserWindow, BrowserView, ipcMain, Notification, Tray, Menu,
-  nativeImage, desktopCapturer, session, dialog, shell, screen
+  nativeImage, desktopCapturer, session, dialog, shell, screen, globalShortcut
 } = require('electron');
 const path  = require('path');
 const fs    = require('fs');
@@ -92,7 +92,19 @@ app.whenReady().then(async () => {
     autoUpdater.on('update-available', (info) => {
       const wc = getActiveContents() || welcomeWindow?.webContents;
       if (wc && !wc.isDestroyed()) wc.send('update:available', { version: info.version });
-      new Notification({ title: 'Haven Desktop Update', body: `v${info.version} is available — visit GitHub to download.`, icon: ICON_PATH }).show();
+    });
+    autoUpdater.on('download-progress', (progress) => {
+      const wc = getActiveContents() || welcomeWindow?.webContents;
+      if (wc && !wc.isDestroyed()) wc.send('update:download-progress', { percent: Math.round(progress.percent) });
+    });
+    autoUpdater.on('update-downloaded', () => {
+      const wc = getActiveContents() || welcomeWindow?.webContents;
+      if (wc && !wc.isDestroyed()) wc.send('update:downloaded');
+    });
+    autoUpdater.on('error', (err) => {
+      console.error('[AutoUpdate] Error:', err.message);
+      const wc = getActiveContents() || welcomeWindow?.webContents;
+      if (wc && !wc.isDestroyed()) wc.send('update:error', { message: err.message });
     });
     autoUpdater.checkForUpdates().catch(() => {});
   }
@@ -136,10 +148,35 @@ app.whenReady().then(async () => {
   }
 
   createTray();
+
+  // ── Global shortcut: Ctrl+Shift+Home to reset to welcome screen ──
+  // This is the escape hatch for users who are soft-locked into a broken server
+  globalShortcut.register('CommandOrControl+Shift+Home', () => {
+    if (mainWindow) resetToWelcome();
+  });
 });
 
+// ── Reset to welcome screen (clears saved prefs) ─────────
+function resetToWelcome() {
+  serverManager?.stopServer();
+  // Clean up all BrowserViews
+  for (const [url, view] of serverViews) {
+    mainWindow?.removeBrowserView(view);
+    try { view.webContents.destroy(); } catch {}
+  }
+  serverViews.clear();
+  activeServerUrl = null;
+  // Clear saved connection prefs so user isn't soft-locked
+  store.set('userPrefs.skipWelcome', false);
+  store.set('userPrefs.serverUrl', null);
+  store.set('userPrefs.mode', null);
+  mainWindow?.close();
+  createWelcomeWindow();
+  createTray();
+}
+
 app.on('window-all-closed', () => {
-  // Quit the app when all windows are closed
+  globalShortcut.unregisterAll();
   app.quit();
 });
 
@@ -215,7 +252,9 @@ function createAppWindow(serverUrl) {
 // ── Multi-Server View Management ────────────────────────────
 
 function switchToServer(serverUrl) {
-  const url = serverUrl.replace(/\/+$/, '');
+  // Strip to origin to prevent double-path issues (e.g. user enters /app, then we append /app.html)
+  let url;
+  try { url = new URL(serverUrl).origin; } catch { url = serverUrl.replace(/\/+$/, ''); }
   if (!mainWindow) return;
 
   let view = serverViews.get(url);
@@ -235,6 +274,32 @@ function switchToServer(serverUrl) {
     view.setAutoResize({ width: true, height: true });
 
     view.webContents.loadURL(url + '/app.html');
+
+    // ── Page load timeout — if no content after 15 s, offer to go back ──
+    let loadResolved = false;
+    view.webContents.once('did-finish-load', () => { loadResolved = true; });
+    setTimeout(() => {
+      if (loadResolved || !mainWindow) return;
+      // Check if the page actually has content
+      view.webContents.executeJavaScript('document.body?.innerText?.length || 0').then((len) => {
+        if (len > 20) return; // Page has content, it's fine
+        const choice = dialog.showMessageBoxSync(mainWindow, {
+          type: 'warning',
+          buttons: ['Go Back to Welcome', 'Keep Waiting'],
+          defaultId: 0,
+          title: 'Connection Problem',
+          message: `Haven couldn't load the server at ${url}.\n\nThis could mean the server is down, the address is wrong, or there's a network issue.`,
+        });
+        if (choice === 0) resetToWelcome();
+      }).catch(() => {});
+    }, 15000);
+
+    // ── Handle load failures — send user back to welcome screen ──
+    view.webContents.on('did-fail-load', (_e, errorCode, errorDesc) => {
+      loadResolved = true;
+      console.error(`[Haven Desktop] Failed to load ${url}: ${errorCode} ${errorDesc}`);
+      resetToWelcome();
+    });
 
     // ── Open external links in default browser (issue #5) ──
     view.webContents.on('will-navigate', (event, navUrl) => {
@@ -264,10 +329,15 @@ function switchToServer(serverUrl) {
 function handleWindowOpen(url) {
   try {
     const parsed = new URL(url);
-    // Only switch to the server view if this origin is already a known server
-    if (/^https?:$/.test(parsed.protocol) && serverViews.has(parsed.origin)) {
-      switchToServer(parsed.origin);
-      return;
+    if (/^https?:$/.test(parsed.protocol)) {
+      // If origin is already loaded OR the path suggests a Haven server,
+      // swap within the app window instead of opening a browser.
+      const isKnown = serverViews.has(parsed.origin);
+      const isAppUrl = parsed.pathname === '/app.html' || parsed.pathname === '/' || parsed.pathname === '';
+      if (isKnown || isAppUrl) {
+        switchToServer(parsed.origin);
+        return;
+      }
     }
   } catch { /* not a URL */ }
   if (typeof url === 'string' && /^https?:\/\//i.test(url)) shell.openExternal(url);
@@ -466,6 +536,19 @@ function registerIPC() {
     return r.canceled ? null : r.filePaths[0];
   });
 
+  // ── Auto-Update ───────────────────────────────────────
+  ipcMain.handle('update:download', async () => {
+    if (!autoUpdater) return { error: 'Auto-updater not available' };
+    try { await autoUpdater.downloadUpdate(); return { success: true }; }
+    catch (err) { return { error: err.message }; }
+  });
+  ipcMain.on('update:install', () => {
+    if (autoUpdater) {
+      serverManager?.stopServer();
+      autoUpdater.quitAndInstall(false, true);
+    }
+  });
+
   // ── Audio Capture ─────────────────────────────────────
   ipcMain.handle('audio:get-apps',      () => { try { return audioCapture.getAudioApplications(); } catch { return []; } });
   ipcMain.handle('audio:start-capture',  (_e, pid) => audioCapture.startCapture(pid, pcm => {
@@ -535,7 +618,12 @@ function registerIPC() {
 
   // ── Navigation ────────────────────────────────────────
   ipcMain.on('nav:open-app', (_e, serverUrl) => createAppWindow(serverUrl));
-  ipcMain.on('nav:back-to-welcome', () => { mainWindow?.close(); createWelcomeWindow(); });
+  ipcMain.on('nav:back-to-welcome', () => resetToWelcome());
+  ipcMain.on('nav:switch-server', (_e, serverUrl) => {
+    if (mainWindow && typeof serverUrl === 'string' && /^https?:\/\//i.test(serverUrl)) {
+      try { switchToServer(new URL(serverUrl).origin); } catch {}
+    }
+  });
 
   // ── External links ────────────────────────────────────
   ipcMain.on('open-external', (_e, url) => {

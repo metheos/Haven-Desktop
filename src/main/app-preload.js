@@ -194,9 +194,15 @@ function showScreenPicker(sources, audioApps) {
   }
 
   // ── Cancel ─────────────────────────────────────────────
+  let dismissed = false;
   const dismiss = async (cancelled) => {
+    if (dismissed) return; // prevent double-dismiss
+    dismissed = true;
     overlay.remove();
     document.removeEventListener('keydown', escHandler);
+
+    // Restore focus to the main window content (prevents Wayland focus loss)
+    try { document.body?.focus(); window.focus(); } catch {}
 
     if (!cancelled && selAudioPid) {
       _capturedAudioPid = selAudioPid;
@@ -211,8 +217,11 @@ function showScreenPicker(sources, audioApps) {
   document.getElementById('hsp-cancel').onclick = () => dismiss(true);
   goBtn.onclick = () => dismiss(false);
 
-  const escHandler = (e) => { if (e.key === 'Escape') dismiss(true); };
-  document.addEventListener('keydown', escHandler);
+  // Also dismiss on overlay background click (outside the box)
+  overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) dismiss(true); });
+
+  const escHandler = (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); dismiss(true); } };
+  document.addEventListener('keydown', escHandler, true);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -380,6 +389,18 @@ window.havenDesktop = {
   platform:     process.platform,
   isDesktopApp: true,
 
+  /** Switch to another Haven server inside the app window (hot-swap) */
+  switchServer: (url) => ipcRenderer.send('nav:switch-server', url),
+
+  /** Go back to the welcome / setup screen */
+  backToWelcome: () => ipcRenderer.send('nav:back-to-welcome'),
+
+  /** Auto-update controls */
+  update: {
+    download: () => ipcRenderer.invoke('update:download'),
+    install:  () => ipcRenderer.send('update:install'),
+  },
+
   audio: {
     getApplications: () => ipcRenderer.invoke('audio:get-apps'),
     startCapture:    (pid) => ipcRenderer.invoke('audio:start-capture', pid),
@@ -415,3 +436,79 @@ window.havenDesktop = {
 };
 
 console.log('[Haven Desktop] App preload ready — per-app audio & enhanced features active');
+
+// ═══════════════════════════════════════════════════════════
+// Auto-Update Banner
+//
+// When electron-updater detects a new version, we inject a slim
+// banner at the top of the page so the user can download and
+// install with one click.
+// ═══════════════════════════════════════════════════════════
+
+(function setupAutoUpdateBanner() {
+  let bannerEl = null;
+
+  function createBanner(text, buttonLabel, buttonAction) {
+    removeBanner();
+    bannerEl = document.createElement('div');
+    bannerEl.id = 'haven-update-banner';
+    bannerEl.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:999998;background:linear-gradient(135deg,#6b4fdb,#8b6ce7);color:#fff;display:flex;align-items:center;justify-content:center;gap:12px;padding:8px 16px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;font-size:13px;box-shadow:0 2px 8px rgba(0,0,0,.3);';
+    const msg = document.createElement('span');
+    msg.textContent = text;
+    msg.id = 'haven-update-msg';
+    bannerEl.appendChild(msg);
+    if (buttonLabel) {
+      const btn = document.createElement('button');
+      btn.textContent = buttonLabel;
+      btn.id = 'haven-update-btn';
+      btn.style.cssText = 'background:#fff;color:#6b4fdb;border:none;border-radius:4px;padding:4px 14px;font-weight:600;cursor:pointer;font-size:12px;';
+      btn.onclick = buttonAction;
+      bannerEl.appendChild(btn);
+    }
+    const close = document.createElement('button');
+    close.textContent = '✕';
+    close.style.cssText = 'background:none;border:none;color:rgba(255,255,255,.7);cursor:pointer;font-size:16px;padding:0 4px;margin-left:4px;';
+    close.onclick = removeBanner;
+    bannerEl.appendChild(close);
+    document.body.prepend(bannerEl);
+  }
+
+  function removeBanner() {
+    if (bannerEl) { bannerEl.remove(); bannerEl = null; }
+  }
+
+  ipcRenderer.on('update:available', (_e, { version }) => {
+    createBanner(
+      `Haven Desktop v${version} is available!`,
+      'Update Now',
+      async () => {
+        const btn = document.getElementById('haven-update-btn');
+        const msg = document.getElementById('haven-update-msg');
+        if (btn) btn.disabled = true;
+        if (msg) msg.textContent = 'Downloading update...';
+        const res = await ipcRenderer.invoke('update:download');
+        if (res?.error) {
+          if (msg) msg.textContent = `Update failed: ${res.error}`;
+        }
+      }
+    );
+  });
+
+  ipcRenderer.on('update:download-progress', (_e, { percent }) => {
+    const msg = document.getElementById('haven-update-msg');
+    if (msg) msg.textContent = `Downloading update... ${percent}%`;
+  });
+
+  ipcRenderer.on('update:downloaded', () => {
+    createBanner(
+      'Update downloaded! Restart to apply.',
+      'Restart Now',
+      () => ipcRenderer.send('update:install')
+    );
+  });
+
+  ipcRenderer.on('update:error', (_e, { message }) => {
+    const msg = document.getElementById('haven-update-msg');
+    if (msg) msg.textContent = `Update error: ${message}`;
+  });
+})();

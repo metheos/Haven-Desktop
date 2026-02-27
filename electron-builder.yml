@@ -13,6 +13,7 @@ directories:
 
 files:
   - "src/**/*"
+  - "assets/**/*"
   - "native/build/Release/*.node"
   - "node_modules/**/*"
   - "!node_modules/**/build/Release/obj*"
