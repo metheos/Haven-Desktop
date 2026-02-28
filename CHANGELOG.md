@@ -1,5 +1,12 @@
 # Haven Desktop Changelog
 
+## v1.0.5
+
+### Bug Fixes
+- **Windows volume ducking** — The desktop app no longer causes Windows to lower its own volume (or other apps') in the volume mixer when voice activity is detected. The audio capture stream is now categorized as `AudioCategory_Other`, opting out of Windows' automatic communications ducking behavior.
+
+---
+
 ## v1.0.4
 
 ### New Features

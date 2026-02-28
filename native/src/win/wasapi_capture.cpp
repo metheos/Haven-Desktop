@@ -23,6 +23,7 @@
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <audiopolicy.h>
+#include <audiosessiontypes.h>
 #include <functiondiscoverykeys_devpkey.h>
 #include <Psapi.h>
 #include <tlhelp32.h>
@@ -295,6 +296,23 @@ void WasapiCapture::captureLoop() {
         CoUninitialize();
         m_running = false;
         return;
+    }
+
+    // ── Opt out of Windows communications ducking ──────────
+    // Without this, Windows may classify our loopback capture as a
+    // "Communications" stream and automatically duck (lower) the volume
+    // of the Haven app and other audio while capture is active.
+    {
+        IAudioClient2* client2 = nullptr;
+        if (SUCCEEDED(client->QueryInterface(__uuidof(IAudioClient2), (void**)&client2))) {
+            AudioClientProperties props = {};
+            props.cbSize    = sizeof(AudioClientProperties);
+            props.bIsOffload = FALSE;
+            props.eCategory = AudioCategory_Other;
+            props.Options   = AUDCLNT_STREAMOPTIONS_NONE;
+            client2->SetClientProperties(&props);
+            client2->Release();
+        }
     }
 
     // ── Configure format: 48 kHz, float32, stereo ─────────
