@@ -1,5 +1,15 @@
 # Haven Desktop Changelog
 
+## v1.0.7
+
+### Bug Fixes
+- **Taskbar badge now reliably appears for unread messages** — three bugs were causing the overlay badge to fail or behave erratically: (1) a `focus` event cleared the badge immediately whenever the window was focused, even with unreads remaining; (2) an `isFocused()` guard on the IPC handler blocked the badge from being set while the app was open but you were in a different channel; (3) `flashFrame` was firing unconditionally, causing taskbar flicker even when the window was already in focus. All three are fixed.
+
+### Improvements
+- **Haven-branded notification badge** — the overlay icon is now a Haven hexagon with the app's signature purple gradient and a "!" mark, instead of a plain fuchsia circle.
+
+---
+
 ## v1.0.6
 
 ### Improvements
