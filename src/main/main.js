@@ -233,7 +233,8 @@ function createAppWindow(serverUrl) {
     };
     mainWindow.on('resize', saveBounds);
     mainWindow.on('move',   saveBounds);
-    mainWindow.on('focus',  clearNotificationBadge);
+    // Badge is cleared by the web app when unreads reach zero, not on raw focus.
+    // Clearing on focus caused the overlay to vanish even while unreads remained.
     mainWindow.on('closed', () => {
       serverViews.clear();
       activeServerUrl = null;
@@ -352,25 +353,77 @@ function getActiveContents() {
 // ── Notification Badge ───────────────────────────────────────
 
 function createBadgeIcon() {
-  const s = 16, buf = Buffer.alloc(s * s * 4, 0);
+  // 32×32 renders sharply on HiDPI Windows taskbars.
+  // Shape: pointy-top hexagon matching Haven's app icon.
+  // Fill: diagonal gradient #8b6ff0 → #6b4fdb (same as the SVG brand mark).
+  // Ring: 2px light-lavender edge echoing the hex outline stroke.
+  // Mark: white "!" so it reads clearly as a notification badge.
+  const s = 32;
+  const buf = Buffer.alloc(s * s * 4, 0);
+  const cx = s / 2 - 0.5, cy = s / 2 - 0.5;  // sub-pixel center
+  const R     = 14.5;  // outer circumradius
+  const fillR = R - 2; // inner fill radius (= ring width of 2px)
+
+  // Pointy-top hex: first vertex at top (image coords with y-down axis).
+  // Angles: π/2, π/2+π/3, π/2+2π/3, …
+  const uv = Array.from({ length: 6 }, (_, k) => {
+    const a = Math.PI / 2 + k * Math.PI / 3;
+    return [Math.cos(a), -Math.sin(a)]; // y-down: negate sin
+  });
+
+  // CW point-in-regular-hexagon test (cross product, all edges must have cross ≤ 0).
+  function inHex(px, py, r) {
+    const x = px - cx, y = py - cy;
+    for (let k = 0; k < 6; k++) {
+      const ax = uv[k][0] * r,       ay = uv[k][1] * r;
+      const bx = uv[(k + 1) % 6][0] * r, by = uv[(k + 1) % 6][1] * r;
+      if ((bx - ax) * (y - ay) - (by - ay) * (x - ax) > 0) return false;
+    }
+    return true;
+  }
+
   for (let y = 0; y < s; y++) {
     for (let x = 0; x < s; x++) {
-      const dx = x - s / 2, dy = y - s / 2;
-      if (Math.sqrt(dx * dx + dy * dy) < s / 2 - 0.5) {
-        const i = (y * s + x) * 4;
-        // Haven purple #6b4fdb
-        buf[i] = 107; buf[i + 1] = 79; buf[i + 2] = 219; buf[i + 3] = 255;
+      const px = x + 0.5, py = y + 0.5; // test pixel centre
+      if (!inHex(px, py, R)) continue;  // transparent outside hex
+
+      const i = (y * s + x) * 4;
+      if (!inHex(px, py, fillR)) {
+        // Ring: soft lavender-white, echoes the hex outline in the app icon
+        buf[i] = 220; buf[i + 1] = 210; buf[i + 2] = 248; buf[i + 3] = 255;
+      } else {
+        // Gradient fill: #8b6ff0 (top-left) → #6b4fdb (bottom-right)
+        const t = Math.max(0, Math.min(1, ((px - cx) + (py - cy)) / (fillR * 2) + 0.5));
+        buf[i]     = Math.round(0x8b + t * (0x6b - 0x8b)); // 139 → 107
+        buf[i + 1] = Math.round(0x6f + t * (0x4f - 0x6f)); // 111 →  79
+        buf[i + 2] = Math.round(0xf0 + t * (0xdb - 0xf0)); // 240 → 219
+        buf[i + 3] = 255;
       }
     }
   }
+
+  // White "!" centered at x=15.5 (4px wide: px 14–17).
+  // Bar: y 8–17 (10px).  Gap: y 18–21.  Dot: y 22–24 (3px).
+  const paint = (px, py) => {
+    if (px < 0 || px >= s || py < 0 || py >= s) return;
+    const idx = (py * s + px) * 4;
+    if (buf[idx + 3] === 0) return; // don't bleed outside hex
+    buf[idx] = buf[idx + 1] = buf[idx + 2] = 255; buf[idx + 3] = 255;
+  };
+  for (let py = 8;  py <= 17; py++) for (let px = 14; px <= 17; px++) paint(px, py);
+  for (let py = 22; py <= 24; py++) for (let px = 14; px <= 17; px++) paint(px, py);
+
   return nativeImage.createFromBuffer(buf, { width: s, height: s });
 }
 
 function setNotificationBadge() {
   if (!mainWindow) return;
+  // Overlay/dock badge: always show when there are unreads (even if window is focused —
+  // the user may be in a different channel and hasn't seen the new message yet).
   if (process.platform === 'win32' && badgeIcon) mainWindow.setOverlayIcon(badgeIcon, 'New messages');
   if (process.platform === 'darwin' || process.platform === 'linux') app.setBadgeCount(1);
-  mainWindow.flashFrame(true);
+  // Taskbar flash: only when the window is not already in focus (avoids annoying flicker).
+  if (!mainWindow.isFocused()) mainWindow.flashFrame(true);
 }
 
 function clearNotificationBadge() {
@@ -592,19 +645,20 @@ function registerIPC() {
     n.show();
     n.on('click', () => { mainWindow?.show(); mainWindow?.focus(); });
 
-    // Taskbar notification badge when window is not focused
-    if (mainWindow && !mainWindow.isFocused()) setNotificationBadge();
+    // Set badge whenever a native notification fires; setNotificationBadge()
+    // now handles isFocused internally for flashFrame only.
+    if (mainWindow) setNotificationBadge();
     return true;
   });
 
   // ── Unread badge signal (fired by renderer on any unread count change) ──
   // Works even when native push notifications are unavailable (VPN/LAN setups).
+  // No isFocused() guard here — the overlay should reflect real unread state
+  // regardless of whether the window is currently focused. The renderer fires
+  // hasUnread=false only once all channels are actually read.
   ipcMain.on('notification-badge', (_e, hasUnread) => {
-    if (hasUnread) {
-      if (mainWindow && !mainWindow.isFocused()) setNotificationBadge();
-    } else {
-      clearNotificationBadge();
-    }
+    if (hasUnread) setNotificationBadge();
+    else clearNotificationBadge();
   });
 
   // ── Window Controls ───────────────────────────────────
