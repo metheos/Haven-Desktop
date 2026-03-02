@@ -1,5 +1,12 @@
 # Haven Desktop Changelog
 
+## v1.0.8
+
+### Bug Fixes
+- **Auto-launch no longer broken after server load failure** — a bug introduced in v1.0.7 (alongside the FCM/installer update) caused the app to forget your saved server on any load failure or startup hiccup, permanently dropping you back to the welcome screen on every subsequent launch. The fix: your server preferences (path, URL, mode) are now preserved across failures so the next launch retries automatically. Use Ctrl+Shift+Home to intentionally reset and return to the welcome screen.
+
+---
+
 ## v1.0.7
 
 ### Bug Fixes

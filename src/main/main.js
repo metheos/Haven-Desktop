@@ -153,12 +153,15 @@ app.whenReady().then(async () => {
   // ── Global shortcut: Ctrl+Shift+Home to reset to welcome screen ──
   // This is the escape hatch for users who are soft-locked into a broken server
   globalShortcut.register('CommandOrControl+Shift+Home', () => {
-    if (mainWindow) resetToWelcome();
+    if (mainWindow) resetToWelcome(true); // full reset — user explicitly requested
   });
 });
 
-// ── Reset to welcome screen (clears saved prefs) ─────────
-function resetToWelcome() {
+// ── Reset to welcome screen ─────────────────────────────
+// clearPrefs=true only when the user explicitly requests a full reset
+// (Ctrl+Shift+Home). Automatic failures (load errors, etc.) use the default
+// clearPrefs=false so the stored server path survives and next launch retries.
+function resetToWelcome(clearPrefs = false) {
   serverManager?.stopServer();
   // Clean up all BrowserViews
   for (const [url, view] of serverViews) {
@@ -168,10 +171,12 @@ function resetToWelcome() {
   serverViews.clear();
   activeServerUrl = null;
   primaryServerUrl = null;
-  // Clear saved connection prefs so user isn't soft-locked
-  store.set('userPrefs.skipWelcome', false);
-  store.set('userPrefs.serverUrl', null);
-  store.set('userPrefs.mode', null);
+  if (clearPrefs) {
+    // Full reset — user explicitly chose to forget their server
+    store.set('userPrefs.skipWelcome', false);
+    store.set('userPrefs.serverUrl', null);
+    store.set('userPrefs.mode', null);
+  }
   mainWindow?.close();
   createWelcomeWindow();
   createTray();
