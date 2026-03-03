@@ -48,6 +48,11 @@ window.addEventListener('DOMContentLoaded', () => {
 let _audioWorkletNode    = null;
 let _audioCtx            = null;
 let _audioDestination    = null;
+// ─── Global voice shortcut triggers ──────────────────────
+ipcRenderer.on('voice:mute-toggle',   () => document.getElementById('voice-mute-btn')?.click());
+ipcRenderer.on('voice:deafen-toggle', () => document.getElementById('voice-deafen-btn')?.click());
+ipcRenderer.on('voice:ptt-toggle',    () => document.getElementById('voice-mute-btn')?.click());
+
 // ─── Forward server log messages to the browser console ──
 ipcRenderer.on('server:log', (_event, msg) => {
   console.log('[Haven Server]', msg.trimEnd());
@@ -441,6 +446,12 @@ window.havenDesktop = {
   },
 
   notify: (title, body, opts = {}) => ipcRenderer.invoke('notify', { title, body, ...opts }),
+
+  /** Desktop shortcut configuration */
+  shortcuts: {
+    getConfig: ()         => ipcRenderer.invoke('shortcuts:get'),
+    setConfig: (updates)  => ipcRenderer.invoke('shortcuts:register', updates),
+  },
 
   /** Signal the taskbar/dock badge (no native notification needed) */
   setUnreadBadge: (hasUnread) => ipcRenderer.send('notification-badge', hasUnread),

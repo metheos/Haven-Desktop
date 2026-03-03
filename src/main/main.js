@@ -40,6 +40,11 @@ const store = new Store({
       audioOutput: null,      // preferred speaker device ID
     },
     windowBounds: { width: 1200, height: 800 },
+    desktopShortcuts: {
+      mute:   'CommandOrControl+Shift+M',  // toggle mute
+      deafen: 'CommandOrControl+Shift+D',  // toggle deafen
+      ptt:    '',                           // push-to-talk (empty = disabled)
+    },
   },
 });
 
@@ -130,6 +135,7 @@ app.whenReady().then(async () => {
 
   registerIPC();
   registerScreenShareHandler();
+  registerVoiceShortcuts();
 
   const prefs = store.get('userPrefs');
 
@@ -156,6 +162,33 @@ app.whenReady().then(async () => {
     if (mainWindow) resetToWelcome(true); // full reset — user explicitly requested
   });
 });
+
+// ── Voice / PTT global shortcuts ───────────────────────
+function unregisterVoiceShortcuts() {
+  const cfg = store.get('desktopShortcuts') || {};
+  ['mute', 'deafen', 'ptt'].forEach(k => {
+    try { if (cfg[k]) globalShortcut.unregister(cfg[k]); } catch {}
+  });
+}
+
+function registerVoiceShortcuts() {
+  unregisterVoiceShortcuts();
+  const cfg = store.get('desktopShortcuts') || {};
+  const bind = (accel, event) => {
+    if (!accel) return;
+    try {
+      globalShortcut.register(accel, () => {
+        const wc = getActiveContents();
+        if (wc && !wc.isDestroyed()) wc.send(event);
+      });
+    } catch (e) {
+      console.warn(`[Shortcuts] Failed to register ${accel}:`, e.message);
+    }
+  };
+  bind(cfg.mute,   'voice:mute-toggle');
+  bind(cfg.deafen, 'voice:deafen-toggle');
+  bind(cfg.ptt,    'voice:ptt-toggle');
+}
 
 // ── Reset to welcome screen ─────────────────────────────
 // clearPrefs=true only when the user explicitly requests a full reset
@@ -704,7 +737,8 @@ function registerIPC() {
   // ── Settings ──────────────────────────────────────────
   const ALLOWED_SETTINGS_KEYS = new Set([
     'userPrefs', 'windowBounds', 'audioInputDevice', 'audioOutputDevice',
-    'lastServer', 'pushToTalk', 'pushToTalkKey', 'noiseGate', 'noiseThreshold'
+    'lastServer', 'pushToTalk', 'pushToTalkKey', 'noiseGate', 'noiseThreshold',
+    'desktopShortcuts'
   ]);
   ipcMain.handle('settings:get', (_e, key)        => store.get(key));
   ipcMain.handle('settings:set', (_e, key, value)  => {
@@ -715,6 +749,26 @@ function registerIPC() {
 
   // ── App Info ──────────────────────────────────────────
   ipcMain.handle('app:version', () => app.getVersion());
+
+  // ── Desktop Shortcuts ─────────────────────────────────
+  ipcMain.handle('shortcuts:get', () => store.get('desktopShortcuts') || {});
+  ipcMain.handle('shortcuts:register', (_e, updates) => {
+    if (!updates || typeof updates !== 'object') return false;
+    unregisterVoiceShortcuts();
+    const cfg = { ...store.get('desktopShortcuts') };
+    const allowed = new Set(['mute', 'deafen', 'ptt']);
+    Object.entries(updates).forEach(([k, v]) => {
+      if (allowed.has(k) && typeof v === 'string' && v.length <= 50) cfg[k] = v;
+    });
+    store.set('desktopShortcuts', cfg);
+    registerVoiceShortcuts();
+    // Report registration success for each non-empty shortcut
+    const result = {};
+    Object.entries(cfg).forEach(([k, v]) => {
+      result[k] = v ? globalShortcut.isRegistered(v) : true;
+    });
+    return result;
+  });
 
   // ── Navigation ────────────────────────────────────────
   ipcMain.on('nav:open-app', (_e, serverUrl) => createAppWindow(serverUrl));
