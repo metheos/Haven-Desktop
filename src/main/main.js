@@ -45,8 +45,16 @@ const store = new Store({
       deafen: 'CommandOrControl+Shift+D',  // toggle deafen
       ptt:    '',                           // push-to-talk (empty = disabled)
     },
+    startOnLogin:   false,    // launch Haven Desktop on OS login
+    minimizeToTray: false,    // close button hides to tray instead of quitting
+    forceSDR:       false,    // force sRGB color profile (fixes HDR over-saturation)
   },
 });
+
+// ── Force sRGB color profile when user has HDR issues (must be before app.whenReady) ──
+if (store.get('forceSDR')) {
+  app.commandLine.appendSwitch('force-color-profile', 'srgb');
+}
 
 // ── State ─────────────────────────────────────────────────
 let mainWindow      = null;
@@ -92,25 +100,28 @@ app.whenReady().then(async () => {
   audioCapture  = new AudioCaptureManager();
   badgeIcon     = createBadgeIcon();
 
+  // ── Sync start-on-login with OS ──────────────────────
+  app.setLoginItemSettings({ openAtLogin: !!store.get('startOnLogin') });
+
   // ── Auto-update check (issue #3) ──────────────────────
   if (autoUpdater) {
     autoUpdater.autoDownload = false;
     autoUpdater.on('update-available', (info) => {
       const wc = getActiveContents() || welcomeWindow?.webContents;
-      if (wc && !wc.isDestroyed()) wc.send('update:available', { version: info.version });
+      if (wc && !wc.isDestroyed()) { try { wc.send('update:available', { version: info.version }); } catch {} }
     });
     autoUpdater.on('download-progress', (progress) => {
       const wc = getActiveContents() || welcomeWindow?.webContents;
-      if (wc && !wc.isDestroyed()) wc.send('update:download-progress', { percent: Math.round(progress.percent) });
+      if (wc && !wc.isDestroyed()) { try { wc.send('update:download-progress', { percent: Math.round(progress.percent) }); } catch {} }
     });
     autoUpdater.on('update-downloaded', () => {
       const wc = getActiveContents() || welcomeWindow?.webContents;
-      if (wc && !wc.isDestroyed()) wc.send('update:downloaded');
+      if (wc && !wc.isDestroyed()) { try { wc.send('update:downloaded'); } catch {} }
     });
     autoUpdater.on('error', (err) => {
       console.error('[AutoUpdate] Error:', err.message);
       const wc = getActiveContents() || welcomeWindow?.webContents;
-      if (wc && !wc.isDestroyed()) wc.send('update:error', { message: err.message });
+      if (wc && !wc.isDestroyed()) { try { wc.send('update:error', { message: err.message }); } catch {} }
     });
     autoUpdater.checkForUpdates().catch(() => {});
   }
@@ -121,7 +132,7 @@ app.whenReady().then(async () => {
   // Forward server log lines to whichever renderer window is active
   serverManager.onLog((msg) => {
     const wc = getActiveContents() || welcomeWindow?.webContents;
-    if (wc && !wc.isDestroyed()) wc.send('server:log', msg);
+    if (wc && !wc.isDestroyed()) { try { wc.send('server:log', msg); } catch {} }
   });
 
   // Auto-grant camera, mic, and screen-share permissions for all server views
@@ -179,7 +190,7 @@ function registerVoiceShortcuts() {
     try {
       globalShortcut.register(accel, () => {
         const wc = getActiveContents();
-        if (wc && !wc.isDestroyed()) wc.send(event);
+        if (wc && !wc.isDestroyed()) { try { wc.send(event); } catch {} }
       });
     } catch (e) {
       console.warn(`[Shortcuts] Failed to register ${accel}:`, e.message);
@@ -221,6 +232,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  app.isQuitting = true;
   serverManager?.stopServer();
   audioCapture?.cleanup();
 });
@@ -267,12 +279,21 @@ function createAppWindow(serverUrl) {
     });
 
     const saveBounds = () => {
-      if (!mainWindow) return;
+      if (!mainWindow || mainWindow.isMaximized()) return;
       const b = mainWindow.getBounds();
-      store.set('windowBounds', { width: b.width, height: b.height });
+      store.set('windowBounds', { x: b.x, y: b.y, width: b.width, height: b.height });
     };
     mainWindow.on('resize', saveBounds);
     mainWindow.on('move',   saveBounds);
+
+    // ── Minimize-to-tray: intercept close if enabled ──
+    mainWindow.on('close', (e) => {
+      if (!app.isQuitting && store.get('minimizeToTray')) {
+        e.preventDefault();
+        mainWindow.hide();
+      }
+    });
+
     // Badge is cleared by the web app when unreads reach zero, not on raw focus.
     // Clearing on focus caused the overlay to vanish even while unreads remained.
     mainWindow.on('closed', () => {
@@ -527,6 +548,8 @@ function createTray() {
   const rebuildMenu = () => {
     const running = serverManager?.isRunning();
     tray.setContextMenu(Menu.buildFromTemplate([
+      { label: `Haven Desktop v${app.getVersion()}`, enabled: false },
+      { type: 'separator' },
       { label: 'Show Haven', click: () => { (mainWindow || welcomeWindow)?.show(); (mainWindow || welcomeWindow)?.focus(); } },
       { type: 'separator' },
       { label: running ? '● Server Running' : '○ Server Stopped', enabled: false },
@@ -738,7 +761,7 @@ function registerIPC() {
   const ALLOWED_SETTINGS_KEYS = new Set([
     'userPrefs', 'windowBounds', 'audioInputDevice', 'audioOutputDevice',
     'lastServer', 'pushToTalk', 'pushToTalkKey', 'noiseGate', 'noiseThreshold',
-    'desktopShortcuts'
+    'desktopShortcuts', 'startOnLogin', 'minimizeToTray', 'forceSDR'
   ]);
   ipcMain.handle('settings:get', (_e, key)        => store.get(key));
   ipcMain.handle('settings:set', (_e, key, value)  => {
@@ -749,6 +772,30 @@ function registerIPC() {
 
   // ── App Info ──────────────────────────────────────────
   ipcMain.handle('app:version', () => app.getVersion());
+
+  // ── Desktop App Preferences ───────────────────────────
+  ipcMain.handle('desktop:get-prefs', () => ({
+    startOnLogin:   !!store.get('startOnLogin'),
+    minimizeToTray: !!store.get('minimizeToTray'),
+    forceSDR:       !!store.get('forceSDR'),
+  }));
+
+  ipcMain.handle('desktop:set-start-on-login', (_e, enabled) => {
+    store.set('startOnLogin', !!enabled);
+    app.setLoginItemSettings({ openAtLogin: !!enabled });
+    return true;
+  });
+
+  ipcMain.handle('desktop:set-minimize-to-tray', (_e, enabled) => {
+    store.set('minimizeToTray', !!enabled);
+    return true;
+  });
+
+  ipcMain.handle('desktop:set-force-sdr', (_e, enabled) => {
+    store.set('forceSDR', !!enabled);
+    // force-color-profile is a Chromium command-line switch, requires restart
+    return { requiresRestart: true };
+  });
 
   // ── Desktop Shortcuts ─────────────────────────────────
   ipcMain.handle('shortcuts:get', () => store.get('desktopShortcuts') || {});

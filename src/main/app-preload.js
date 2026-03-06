@@ -468,6 +468,14 @@ window.havenDesktop = {
   },
 
   getVersion: () => ipcRenderer.invoke('app:version'),
+
+  /** Desktop app preferences (start on login, minimize to tray, HDR/SDR) */
+  prefs: {
+    get:              ()      => ipcRenderer.invoke('desktop:get-prefs'),
+    setStartOnLogin:  (v)     => ipcRenderer.invoke('desktop:set-start-on-login', v),
+    setMinimizeToTray:(v)     => ipcRenderer.invoke('desktop:set-minimize-to-tray', v),
+    setForceSDR:      (v)     => ipcRenderer.invoke('desktop:set-force-sdr', v),
+  },
 };
 
 console.log('[Haven Desktop] App preload ready — per-app audio & enhanced features active');

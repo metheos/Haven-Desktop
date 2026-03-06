@@ -1,5 +1,15 @@
 # Haven Desktop Changelog
 
+## v1.0.9
+
+### Added
+- **Global voice keyboard shortcuts** — mute, deafen, and push-to-talk can now be assigned to system-wide hotkeys in Settings → Keyboard Shortcuts. Shortcuts work even when Haven Desktop isn't the focused window.
+
+### Bug Fixes
+- **Blank app window** — the renderer window could go completely blank after server restarts, reconnects, or rapid view transitions. Root cause: `wc.send()` throws synchronously with "Render frame was disposed before WebFrameMain could be accessed" when Electron tears down a BrowserView's render frame between the `isDestroyed()` guard and the send. All `wc.send()` call sites in the main process are now wrapped in a `try/catch` to absorb this race condition silently.
+
+---
+
 ## v1.0.8
 
 ### Bug Fixes
