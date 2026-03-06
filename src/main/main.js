@@ -107,21 +107,17 @@ app.whenReady().then(async () => {
   if (autoUpdater) {
     autoUpdater.autoDownload = false;
     autoUpdater.on('update-available', (info) => {
-      const wc = getActiveContents() || welcomeWindow?.webContents;
-      if (wc && !wc.isDestroyed()) { try { wc.send('update:available', { version: info.version }); } catch {} }
+      safeSend(getActiveContents() || welcomeWindow?.webContents, 'update:available', { version: info.version });
     });
     autoUpdater.on('download-progress', (progress) => {
-      const wc = getActiveContents() || welcomeWindow?.webContents;
-      if (wc && !wc.isDestroyed()) { try { wc.send('update:download-progress', { percent: Math.round(progress.percent) }); } catch {} }
+      safeSend(getActiveContents() || welcomeWindow?.webContents, 'update:download-progress', { percent: Math.round(progress.percent) });
     });
     autoUpdater.on('update-downloaded', () => {
-      const wc = getActiveContents() || welcomeWindow?.webContents;
-      if (wc && !wc.isDestroyed()) { try { wc.send('update:downloaded'); } catch {} }
+      safeSend(getActiveContents() || welcomeWindow?.webContents, 'update:downloaded');
     });
     autoUpdater.on('error', (err) => {
       console.error('[AutoUpdate] Error:', err.message);
-      const wc = getActiveContents() || welcomeWindow?.webContents;
-      if (wc && !wc.isDestroyed()) { try { wc.send('update:error', { message: err.message }); } catch {} }
+      safeSend(getActiveContents() || welcomeWindow?.webContents, 'update:error', { message: err.message });
     });
     autoUpdater.checkForUpdates().catch(() => {});
   }
@@ -129,10 +125,18 @@ app.whenReady().then(async () => {
   // ── Linux desktop integration (issue #3) ──────────────
   if (process.platform === 'linux') installLinuxDesktopEntry();
 
-  // Forward server log lines to whichever renderer window is active
+  // Forward server log lines to whichever renderer window is active.
+  // Batched to 50 ms to avoid overwhelming the renderer with rapid IPC sends
+  // during server startup / reconnect bursts.
+  let _logBuf = '', _logTimer = null;
   serverManager.onLog((msg) => {
-    const wc = getActiveContents() || welcomeWindow?.webContents;
-    if (wc && !wc.isDestroyed()) { try { wc.send('server:log', msg); } catch {} }
+    _logBuf += msg;
+    if (_logTimer) return;
+    _logTimer = setTimeout(() => {
+      const batch = _logBuf;
+      _logBuf = ''; _logTimer = null;
+      safeSend(getActiveContents() || welcomeWindow?.webContents, 'server:log', batch);
+    }, 50);
   });
 
   // Auto-grant camera, mic, and screen-share permissions for all server views
@@ -189,8 +193,7 @@ function registerVoiceShortcuts() {
     if (!accel) return;
     try {
       globalShortcut.register(accel, () => {
-        const wc = getActiveContents();
-        if (wc && !wc.isDestroyed()) { try { wc.send(event); } catch {} }
+        safeSend(getActiveContents(), event);
       });
     } catch (e) {
       console.warn(`[Shortcuts] Failed to register ${accel}:`, e.message);
@@ -405,6 +408,18 @@ function switchToServer(serverUrl) {
       return { action: 'deny' };
     });
 
+    // ── Auto-recover from renderer crashes ──
+    // When the BrowserView's renderer dies the screen goes blank with no
+    // automatic recovery.  Re-load the page after a short pause.
+    view.webContents.on('render-process-gone', (_e, details) => {
+      if (details.reason === 'clean-exit') return;
+      console.warn(`[Haven Desktop] Renderer crashed (${details.reason}) for ${url}, reloading…`);
+      setTimeout(() => {
+        if (!mainWindow || !serverViews.has(url)) return;
+        try { view.webContents.loadURL(url + '/app.html'); } catch {}
+      }, 1500);
+    });
+
     // Only open DevTools for the first server view in dev mode
     if (IS_DEV && serverViews.size === 0) view.webContents.openDevTools({ mode: 'detach' });
     serverViews.set(url, view);
@@ -434,6 +449,19 @@ function getActiveContents() {
   if (activeServerUrl && serverViews.has(activeServerUrl))
     return serverViews.get(activeServerUrl).webContents;
   return mainWindow?.webContents || welcomeWindow?.webContents || null;
+}
+
+/**
+ * Guard against "Render frame was disposed before WebFrameMain could be
+ * accessed".  Checking `wc.mainFrame` before `send()` prevents Electron's
+ * native C++ layer from even attempting the IPC send to a disposed frame.
+ * The try/catch stays as a safety net for the remaining race window.
+ */
+function safeSend(wc, channel, ...args) {
+  try {
+    if (!wc || wc.isDestroyed() || !wc.mainFrame) return;
+    wc.send(channel, ...args);
+  } catch { /* frame disposed between check and send — harmless */ }
 }
 
 // ── Notification Badge ───────────────────────────────────────
@@ -605,7 +633,7 @@ function registerScreenShareHandler() {
       if (!targetContents) { callback({}); return; }
 
       // Ask renderer to show the picker
-      targetContents.send('screen:show-picker', { sources: sourceData, audioApps });
+      safeSend(targetContents, 'screen:show-picker', { sources: sourceData, audioApps });
 
       // Wait for picker result (or 60 s timeout)
       const result = await new Promise(resolve => {
@@ -624,9 +652,7 @@ function registerScreenShareHandler() {
       if (result.audioAppPid && result.audioAppPid > 0) {
         try {
           audioCapture.startCapture(result.audioAppPid, (pcmData) => {
-            if (targetContents && !targetContents.isDestroyed()) {
-              targetContents.send('audio:capture-data', pcmData);
-            }
+            safeSend(targetContents, 'audio:capture-data', pcmData);
           });
           usePerAppAudio = true;
         } catch (err) {
@@ -697,8 +723,7 @@ function registerIPC() {
   // ── Audio Capture ─────────────────────────────────────
   ipcMain.handle('audio:get-apps',      () => { try { return audioCapture.getAudioApplications(); } catch { return []; } });
   ipcMain.handle('audio:start-capture',  (_e, pid) => audioCapture.startCapture(pid, pcm => {
-    const wc = getActiveContents();
-    if (wc && !wc.isDestroyed()) wc.send('audio:capture-data', pcm);
+    safeSend(getActiveContents(), 'audio:capture-data', pcm);
   }));
   ipcMain.handle('audio:stop-capture',   () => audioCapture.stopCapture());
   ipcMain.handle('audio:is-supported',   () => audioCapture.isSupported());

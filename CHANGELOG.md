@@ -6,7 +6,10 @@
 - **Global voice keyboard shortcuts** — mute, deafen, and push-to-talk can now be assigned to system-wide hotkeys in Settings → Keyboard Shortcuts. Shortcuts work even when Haven Desktop isn't the focused window.
 
 ### Bug Fixes
-- **Blank app window** — the renderer window could go completely blank after server restarts, reconnects, or rapid view transitions. Root cause: `wc.send()` throws synchronously with "Render frame was disposed before WebFrameMain could be accessed" when Electron tears down a BrowserView's render frame between the `isDestroyed()` guard and the send. All `wc.send()` call sites in the main process are now wrapped in a `try/catch` to absorb this race condition silently.
+- **Blank app window** — the renderer window could go completely blank during server restarts, reconnects, or rapid view transitions. Root cause: `webContents.send()` fires through Electron's native C++ IPC layer *before* throwing a catchable JS exception, so a simple `try/catch` isn't enough — the native send to a disposed render frame still corrupts the renderer's IPC channel. Fix:
+  1. A new `safeSend()` helper checks `wc.mainFrame` (which returns `undefined` when the frame is disposed) *before* calling `send()`, preventing the native code from ever attempting the IPC send.
+  2. Server log forwarding is now batched to 50 ms intervals instead of firing synchronously for every line of stdout — this eliminates the rapid-fire IPC bursts during startup/reconnect.
+  3. A `render-process-gone` crash-recovery handler on each BrowserView automatically reloads the page if the renderer dies for any reason, so the screen can never stay permanently blank.
 
 ---
 
