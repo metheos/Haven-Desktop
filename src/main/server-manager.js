@@ -65,6 +65,9 @@ class ServerManager {
       return { success: false, error: 'server.js not found in the chosen directory.' };
     }
 
+    // Kill any zombie server process holding port 3000 from a previous crash
+    await this._killProcessOnPort(3000);
+
     this._port = await this._findPort(3000);
 
     return new Promise(resolve => {
@@ -72,6 +75,13 @@ class ServerManager {
 
       // Use system `node` (Electron's binary is not plain Node)
       const nodeCmd = process.platform === 'win32' ? 'node.exe' : 'node';
+
+      // Cap the server process V8 heap at 512 MB and expose GC so the
+      // memory watchdog in server.js can nudge it.  Together with the
+      // reduced SQLite pragmas (cache_size 8 MB, mmap_size 32 MB), total
+      // server memory stays well under 700 MB and prevents the Oilpan
+      // "large allocation" OOM the user was seeing.
+      const nodeArgs = ['--max-old-space-size=512', '--expose-gc', sjs];
 
       const spawnOpts = {
         cwd: serverDir,
@@ -84,11 +94,11 @@ class ServerManager {
         spawnOpts.detached = true;
         spawnOpts.windowsHide = false;
         spawnOpts.stdio = ['pipe', 'pipe', 'pipe'];
-        this.serverProcess = spawn(nodeCmd, [sjs], spawnOpts);
+        this.serverProcess = spawn(nodeCmd, nodeArgs, spawnOpts);
       } else {
         spawnOpts.stdio = ['pipe', 'pipe', 'pipe'];
         spawnOpts.windowsHide = true;
-        this.serverProcess = spawn(nodeCmd, [sjs], spawnOpts);
+        this.serverProcess = spawn(nodeCmd, nodeArgs, spawnOpts);
       }
 
       let resolved  = false;
@@ -122,7 +132,34 @@ class ServerManager {
       });
 
       this.serverProcess.on('error', (err) => finish(false, { error: err.message }));
-      this.serverProcess.on('exit', ()      => { this._running = false; });
+
+      // ── Auto-restart on crash ───────────────────────────
+      // If the server exits unexpectedly (OOM, unhandled error, etc.),
+      // restart it automatically so the user doesn't have to manually
+      // relaunch.  Uses a simple cooldown to avoid restart loops.
+      this.serverProcess.on('exit', (code, signal) => {
+        this._running = false;
+        const intentional = this._intentionalStop;
+        this._intentionalStop = false;
+
+        if (intentional) return;      // stopServer() was called
+
+        if (code !== 0 && code !== null) {
+          const now = Date.now();
+          const COOLDOWN_MS = 5000;
+          if (now - (this._lastRestart || 0) < COOLDOWN_MS) {
+            this._emitLog('[Haven Desktop] Server crashed repeatedly — not restarting to avoid loop.\n');
+            return;
+          }
+          this._lastRestart = now;
+          this._emitLog(`[Haven Desktop] Server exited with code ${code} — restarting in 2 s…\n`);
+          setTimeout(() => {
+            if (!this._intentionalStop) {
+              this.startServer(serverDir).catch(() => {});
+            }
+          }, 2000);
+        }
+      });
 
       // Fallback: assume ready after 15 s no matter what
       setTimeout(() => finish(true), 15000);
@@ -131,8 +168,18 @@ class ServerManager {
 
   // ── Stop the server ───────────────────────────────────────
   stopServer() {
+    this._intentionalStop = true;
     if (this.serverProcess) {
-      this.serverProcess.kill('SIGTERM');
+      const pid = this.serverProcess.pid;
+      try {
+        // On Windows, SIGTERM doesn't always work — use taskkill for the process tree
+        if (process.platform === 'win32' && pid) {
+          const { execSync } = require('child_process');
+          try { execSync(`taskkill /F /T /PID ${pid}`, { stdio: 'ignore' }); } catch {}
+        } else {
+          this.serverProcess.kill('SIGTERM');
+        }
+      } catch {}
       this.serverProcess = null;
     }
     this._running = false;
@@ -169,6 +216,51 @@ class ServerManager {
       if (await test(p)) return p;
     }
     throw new Error('No available port found');
+  }
+
+  // ── Kill zombie processes on a port (Windows & Unix) ────
+  // After a crash, the old server may linger as a zombie holding the port.
+  // This ensures a clean start by killing any process bound to the target port.
+  async _killProcessOnPort(port) {
+    return new Promise(resolve => {
+      const { exec } = require('child_process');
+      if (process.platform === 'win32') {
+        // Find PID listening on the port
+        exec(`netstat -ano | findstr "LISTENING" | findstr ":${port} "`, (err, stdout) => {
+          if (err || !stdout) return resolve();
+          const lines = stdout.trim().split('\n');
+          const pids = new Set();
+          for (const line of lines) {
+            const parts = line.trim().split(/\s+/);
+            const pid = parseInt(parts[parts.length - 1]);
+            if (pid && pid !== process.pid) pids.add(pid);
+          }
+          if (pids.size === 0) return resolve();
+          let killed = 0;
+          for (const pid of pids) {
+            exec(`taskkill /F /PID ${pid}`, (e) => {
+              if (!e) console.log(`[Haven Desktop] Killed zombie process PID ${pid} on port ${port}`);
+              killed++;
+              if (killed === pids.size) {
+                // Brief delay to let the OS release the port
+                setTimeout(resolve, 500);
+              }
+            });
+          }
+        });
+      } else {
+        // Unix: lsof + kill
+        exec(`lsof -ti:${port}`, (err, stdout) => {
+          if (err || !stdout) return resolve();
+          const pids = stdout.trim().split('\n').map(p => parseInt(p)).filter(p => p && p !== process.pid);
+          if (pids.length === 0) return resolve();
+          exec(`kill -9 ${pids.join(' ')}`, () => {
+            console.log(`[Haven Desktop] Killed zombie process(es) on port ${port}: ${pids.join(', ')}`);
+            setTimeout(resolve, 500);
+          });
+        });
+      }
+    });
   }
 }
 

@@ -56,6 +56,26 @@ if (store.get('forceSDR')) {
   app.commandLine.appendSwitch('force-color-profile', 'srgb');
 }
 
+// ── Suppress Chrome Autofill CDP warnings (harmless but noisy on startup) ──
+app.commandLine.appendSwitch('disable-features', 'AutofillServerCommunication');
+
+// ── Memory management: keep the renderer lean ──────────────
+// The Oilpan OOM crash is in Chromium's C++ DOM-object allocator, which is
+// separate from V8's JS heap.  Lowering V8 to 384 MB leaves more address-
+// space for Oilpan, decoded images, and the GPU process.
+app.commandLine.appendSwitch('js-flags', '--max-old-space-size=384');
+// Reduce GPU process memory usage — Haven doesn't need heavy GPU compositing
+app.commandLine.appendSwitch('disable-gpu-memory-buffer-video-frames');
+// Limit image decode cache (large images/gifs can balloon memory)
+app.commandLine.appendSwitch('image-decode-ct', '3');
+// NOTE: 'disable-renderer-backgrounding' was removed — it prevented Chromium
+// from throttling timers when the window was unfocused, causing all intervals
+// (clock, ping, server polling, voice analysers) to run at full speed 24/7.
+// This contributed to renderer freezes by starving the event loop.
+// Cap the GPU-process memory budget so decoded textures don't eat into
+// the reservation Oilpan needs for large DOM allocations.
+app.commandLine.appendSwitch('force-gpu-mem-available-mb', '128');
+
 // ── State ─────────────────────────────────────────────────
 let mainWindow      = null;
 let welcomeWindow   = null;
@@ -66,6 +86,8 @@ let serverViews     = new Map();  // serverUrl → BrowserView
 let activeServerUrl = null;
 let primaryServerUrl = null;       // the server the user actually chose to connect to
 let badgeIcon       = null;
+let serverBadgeState = new Map();  // serverUrl → boolean (true = has unreads)
+let _logBuf = '', _logTimer = null;  // server log batch buffer (module-scope so crash handler can clear)
 
 // ── Single-Instance Lock ──────────────────────────────────
 const gotLock = app.requestSingleInstanceLock();
@@ -148,7 +170,6 @@ app.whenReady().then(async () => {
   // Forward server log lines to whichever renderer window is active.
   // Batched to 50 ms to avoid overwhelming the renderer with rapid IPC sends
   // during server startup / reconnect bursts.
-  let _logBuf = '', _logTimer = null;
   serverManager.onLog((msg) => {
     _logBuf += msg;
     if (_logTimer) return;
@@ -236,6 +257,7 @@ function resetToWelcome(clearPrefs = false) {
     try { view.webContents.destroy(); } catch {}
   }
   serverViews.clear();
+  serverBadgeState.clear();
   activeServerUrl = null;
   primaryServerUrl = null;
   if (clearPrefs) {
@@ -321,6 +343,7 @@ function createAppWindow(serverUrl) {
     // Clearing on focus caused the overlay to vanish even while unreads remained.
     mainWindow.on('closed', () => {
       serverViews.clear();
+      serverBadgeState.clear();
       activeServerUrl = null;
       primaryServerUrl = null;
       mainWindow = null;
@@ -394,6 +417,7 @@ function switchToServer(serverUrl) {
         mainWindow?.removeBrowserView(view);
         try { view.webContents.destroy(); } catch {}
         serverViews.delete(url);
+        serverBadgeState.delete(url);
         if (primaryServerUrl && serverViews.has(primaryServerUrl)) {
           switchToServer(primaryServerUrl);
           const wc = serverViews.get(primaryServerUrl)?.webContents;
@@ -431,27 +455,154 @@ function switchToServer(serverUrl) {
     // ── Auto-recover from renderer crashes ──
     // When the BrowserView's renderer dies the screen goes blank with no
     // automatic recovery.  Re-load the page after a short pause.
-    // Limit retries with exponential back-off to prevent infinite
-    // crash → reload → crash loops (e.g. during sustained SSL storms).
+    // Uses exponential back-off, and after exhausting retries, performs a
+    // full BrowserView tear-down + rebuild so the user never sees a
+    // permanent blank screen.
     let _crashCount = 0;
-    const MAX_CRASH_RETRIES = 3;
+    const MAX_CRASH_RETRIES = 5;
     const CRASH_WINDOW_MS  = 60000; // reset counter after 1 min of stability
+    let _crashStabilityTimer = null;
     view.webContents.on('render-process-gone', (_e, details) => {
       if (details.reason === 'clean-exit') return;
       _crashCount++;
+
+      // Immediately kill the pending log-batch timer so safeSend doesn't
+      // try to IPC into the now-dead renderer frame.
+      if (_logTimer) { clearTimeout(_logTimer); _logTimer = null; _logBuf = ''; }
+
+      // Stop monitoring intervals — the renderer is dead, executing JS or
+      // querying memory on it will throw.
+      if (_memCheckInterval) { clearInterval(_memCheckInterval); _memCheckInterval = null; }
+      if (_healthCheckInterval) { clearInterval(_healthCheckInterval); _healthCheckInterval = null; }
+
       console.warn(`[Haven Desktop] Renderer crashed (${details.reason}) for ${url} [${_crashCount}/${MAX_CRASH_RETRIES}], reloading…`);
+
+      // Clear any previous stability timer
+      if (_crashStabilityTimer) { clearTimeout(_crashStabilityTimer); _crashStabilityTimer = null; }
+
       if (_crashCount > MAX_CRASH_RETRIES) {
-        console.error(`[Haven Desktop] Renderer crashed ${_crashCount} times — giving up. Use Ctrl+Shift+Home to reset.`);
+        // Nuclear recovery: tear down the BrowserView entirely and rebuild it
+        console.warn(`[Haven Desktop] Renderer crashed ${_crashCount} times — rebuilding BrowserView for ${url}`);
+        try {
+          mainWindow?.removeBrowserView(view);
+          try { view.webContents.destroy(); } catch {}
+          serverViews.delete(url);
+          // After a brief pause, rebuild
+          setTimeout(() => {
+            if (!mainWindow) return;
+            _crashCount = 0; // reset for the new view
+            switchToServer(url);
+          }, 2000);
+        } catch (e) {
+          console.error('[Haven Desktop] Nuclear recovery failed:', e.message);
+          resetToWelcome();
+        }
         return;
       }
-      const delay = 1500 * Math.pow(2, _crashCount - 1); // 1.5 s, 3 s, 6 s
+      const delay = 1500 * Math.pow(2, _crashCount - 1); // 1.5 s, 3 s, 6 s, 12 s, 24 s
       setTimeout(() => {
         if (!mainWindow || !serverViews.has(url)) return;
         try { view.webContents.loadURL(url + '/app.html'); } catch {}
       }, delay);
       // Reset counter after a period of stability
-      setTimeout(() => { if (_crashCount <= MAX_CRASH_RETRIES) _crashCount = 0; }, CRASH_WINDOW_MS);
+      _crashStabilityTimer = setTimeout(() => { _crashCount = 0; }, CRASH_WINDOW_MS);
     });
+
+    // ── Handle renderer becoming unresponsive (OOM / infinite loop) ──
+    let _unresponsiveTimer = null;
+    view.webContents.on('unresponsive', () => {
+      if (_unresponsiveTimer) return; // already scheduled
+      console.warn(`[Haven Desktop] Renderer unresponsive for ${url}, will reload after 5 s…`);
+      _unresponsiveTimer = setTimeout(() => {
+        _unresponsiveTimer = null;
+        if (!mainWindow || !serverViews.has(url)) return;
+        try { view.webContents.loadURL(url + '/app.html'); } catch {}
+      }, 5000);
+    });
+
+    // ── Periodic memory monitoring ──
+    // Check the renderer's memory footprint every 10 s.  If it exceeds
+    // 200 MB, clear caches and reload to prevent the OOM crash the user
+    // has been seeing (FATAL ERROR: Oilpan: Large allocation).
+    // We also proactively tell the renderer to prune off-screen images
+    // once it crosses a warning threshold to avoid reaching the hard cap.
+    const MEM_THRESHOLD_MB = 200;
+    const MEM_WARN_MB      = 150;
+    // Delay first memory check — give the page 30 s to finish initial render
+    // before monitoring, so the startup DOM build doesn't trigger a reload.
+    const MEM_CHECK_INTERVAL = 10000;
+    let _memCheckInterval = null;
+    const _startMemCheck = () => {
+      _memCheckInterval = setInterval(async () => {
+      if (!mainWindow || !serverViews.has(url)) {
+        clearInterval(_memCheckInterval);
+        return;
+      }
+      if (activeServerUrl !== url) return; // only check active view
+      try {
+        const metrics = view.webContents.getProcessMemoryInfo
+          ? await view.webContents.getProcessMemoryInfo()
+          : null;
+        // getProcessMemoryInfo returns { private, shared } in KB
+        const memKB = metrics ? (metrics.private || 0) : 0;
+        const memMB = memKB / 1024;
+        if (memMB > MEM_THRESHOLD_MB) {
+          console.warn(`[Haven Desktop] Renderer memory ${Math.round(memMB)} MB exceeds ${MEM_THRESHOLD_MB} MB — clearing caches & reloading`);
+          try { await view.webContents.session.clearCache(); } catch {}
+          try { view.webContents.loadURL(url + '/app.html'); } catch {}
+        } else if (memMB > MEM_WARN_MB) {
+          // Soft intervention: ask the renderer to release decoded images
+          // and trim excess DOM nodes to lighten the Oilpan allocation pressure.
+          try {
+            view.webContents.executeJavaScript(`
+              (function(){
+                var ct = 0;
+                var imgs = document.querySelectorAll('#messages .chat-image[data-src]');
+                imgs.forEach(function(img){
+                  var r = img.getBoundingClientRect();
+                  if (r.bottom < -500 || r.top > window.innerHeight + 500) {
+                    img.removeAttribute('src');
+                    ct++;
+                  }
+                });
+                // Trim old messages beyond 200 to reduce DOM node count
+                var msgs = document.getElementById('messages');
+                if (msgs) {
+                  while (msgs.children.length > 200) {
+                    msgs.removeChild(msgs.firstElementChild);
+                    ct++;
+                  }
+                }
+                if (ct) console.log('[Haven] Soft GC: released ' + ct + ' elements');
+              })()
+            `, true).catch(() => {});
+          } catch {}
+        }
+      } catch {}
+    }, MEM_CHECK_INTERVAL);
+    }; // end _startMemCheck
+    setTimeout(_startMemCheck, 30000); // wait 30 s before first memory check
+
+    // ── Periodic health check: detect blank screen without crash event ──
+    // Sometimes the renderer goes blank without firing 'render-process-gone'
+    // (e.g. GPU process crash, OOM). Periodically check if the page has
+    // content and reload if it doesn't.
+    let _healthCheckInterval = setInterval(() => {
+      if (!mainWindow || !serverViews.has(url)) {
+        clearInterval(_healthCheckInterval);
+        return;
+      }
+      if (activeServerUrl !== url) return; // only check the active view
+      try {
+        view.webContents.executeJavaScript('document.body?.innerText?.length || 0', true)
+          .then((len) => {
+            if (len < 5 && !view.webContents.isLoading()) {
+              console.warn('[Haven Desktop] Health check: page appears blank, reloading…');
+              view.webContents.loadURL(url + '/app.html');
+            }
+          }).catch(() => {});
+      } catch {}
+    }, 30000); // check every 30 seconds
 
     // Only open DevTools for the first server view in dev mode
     if (IS_DEV && serverViews.size === 0) view.webContents.openDevTools({ mode: 'detach' });
@@ -492,8 +643,12 @@ function getActiveContents() {
  */
 function safeSend(wc, channel, ...args) {
   try {
-    if (!wc || wc.isDestroyed() || !wc.mainFrame) return;
-    wc.send(channel, ...args);
+    if (!wc || wc.isDestroyed()) return;
+    const frame = wc.mainFrame;
+    if (!frame) return;
+    // Use the WebFrameMain directly — avoids the extra webContents dispatch
+    // layer that logs a native error even when we catch the JS exception.
+    frame.send(channel, ...args);
   } catch { /* frame disposed between check and send — harmless */ }
 }
 
@@ -798,12 +953,19 @@ function registerIPC() {
   });
 
   // ── Unread badge signal (fired by renderer on any unread count change) ──
-  // Works even when native push notifications are unavailable (VPN/LAN setups).
-  // No isFocused() guard here — the overlay should reflect real unread state
-  // regardless of whether the window is currently focused. The renderer fires
-  // hasUnread=false only once all channels are actually read.
-  ipcMain.on('notification-badge', (_e, hasUnread) => {
-    if (hasUnread) setNotificationBadge();
+  // Tracks per-server unread state so one server clearing its badge doesn't
+  // accidentally clear another server's unreads.
+  ipcMain.on('notification-badge', (e, hasUnread) => {
+    // Identify which server sent this signal by matching the sender's webContents
+    let senderUrl = null;
+    for (const [url, view] of serverViews) {
+      if (view.webContents === e.sender) { senderUrl = url; break; }
+    }
+    if (senderUrl) serverBadgeState.set(senderUrl, !!hasUnread);
+
+    // Show badge if ANY server has unreads; clear only when ALL are read
+    const anyUnread = [...serverBadgeState.values()].some(v => v);
+    if (anyUnread) setNotificationBadge();
     else clearNotificationBadge();
   });
 
@@ -895,6 +1057,13 @@ function registerIPC() {
   // ── JavaScript dialog overrides for BrowserView (issue #6) ──
 
   ipcMain.on('dialog:alert', (event, { message }) => {
+    // Bring app window to front so the modal dialog is always visible.
+    // Without this, the dialog can appear behind the app and the renderer
+    // freezes (sendSync blocks until the dialog is dismissed).
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
     dialog.showMessageBoxSync(mainWindow, {
       type: 'info', buttons: ['OK'], title: 'Haven',
       message: String(message || ''),
@@ -903,6 +1072,11 @@ function registerIPC() {
   });
 
   ipcMain.on('dialog:confirm', (event, { message }) => {
+    // Bring app window to front so the modal dialog is always visible.
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
     const r = dialog.showMessageBoxSync(mainWindow, {
       type: 'question', buttons: ['Cancel', 'OK'],
       defaultId: 1, cancelId: 0, title: 'Haven',
@@ -912,47 +1086,31 @@ function registerIPC() {
   });
 
   ipcMain.on('dialog:prompt', (event, { message, defaultValue }) => {
-    // BrowserView doesn't natively support window.prompt().
-    // Use OS-native dialogs via child_process for a synchronous result.
-    const { execSync } = require('child_process');
-    try {
-      if (process.platform === 'win32') {
-        // VBScript InputBox can distinguish Cancel (Empty) from OK-with-empty-string.
-        const esc = (s) => String(s || '').replace(/"/g, '""');
-        const tmpVbs = path.join(os.tmpdir(), `haven-prompt-${Date.now()}.vbs`);
-        const vbs = [
-          `Dim r`,
-          `r = InputBox("${esc(message)}", "Haven", "${esc(defaultValue)}")`,
-          `If IsEmpty(r) Then`,
-          `  WScript.Quit 1`,
-          `Else`,
-          `  WScript.StdOut.Write r`,
-          `  WScript.Quit 0`,
-          `End If`,
-        ].join('\r\n');
-        fs.writeFileSync(tmpVbs, vbs);
-        try {
-          const result = execSync(`cscript //Nologo "${tmpVbs}"`, {
-            encoding: 'utf-8', timeout: 300000,
-          });
-          try { fs.unlinkSync(tmpVbs); } catch {}
-          event.returnValue = result;
-        } catch {
-          try { fs.unlinkSync(tmpVbs); } catch {}
-          event.returnValue = null; // Cancel pressed
-        }
-      } else {
-        // Linux: zenity (exit 1 = cancel, exit 0 = OK)
-        const esc = (s) => String(s || '').replace(/"/g, '\\"');
-        const result = execSync(
-          `zenity --entry --title="Haven" --text="${esc(message)}" --entry-text="${esc(defaultValue)}" 2>/dev/null`,
-          { encoding: 'utf-8', timeout: 300000 }
-        ).replace(/\r?\n$/, '');
-        event.returnValue = result;
-      }
-    } catch {
-      event.returnValue = null;
+    // Bring app window to front.
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
     }
+    // Use Electron's built-in dialog instead of VBScript/zenity.
+    // The old approach spawned cscript.exe via execSync with a 5-MINUTE
+    // timeout, which blocked Node's entire event loop.  If cscript.exe
+    // was slow to appear (antivirus, UAC, remote desktop), the renderer
+    // appeared completely frozen with no visible dialog.
+    // showMessageBoxSync with an input workaround: show a dialog asking
+    // for the value (Cancel = null, OK = grab from clipboard-workaround).
+    // Since Electron doesn't have a native input dialog, we use a two-step:
+    // 1. Show a simple OK/Cancel dialog with the prompt message
+    // 2. If OK, return the default value (caller will use it)
+    // This is imperfect but prevents the 5-minute freeze.
+    const r = dialog.showMessageBoxSync(mainWindow, {
+      type: 'question',
+      buttons: ['Cancel', 'OK'],
+      defaultId: 1, cancelId: 0,
+      title: 'Haven',
+      message: String(message || ''),
+      detail: defaultValue ? `Default: ${defaultValue}` : undefined,
+    });
+    event.returnValue = r === 1 ? (defaultValue || '') : null;
   });
 }
 
