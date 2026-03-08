@@ -391,6 +391,18 @@ function switchToServer(serverUrl) {
 
     view.webContents.loadURL(url + '/app.html');
 
+    // ── Forward renderer performance logs to main process console ──
+    // The renderer's automatic perf diagnostics use console.warn/log with
+    // a [Haven Perf] prefix.  Capture those here so they appear in the
+    // server console panel and Electron's stdout for post-mortem analysis.
+    view.webContents.on('console-message', (_e, level, message) => {
+      if (message.startsWith('[Haven Perf')) {
+        // level: 0=verbose, 1=info, 2=warning, 3=error
+        if (level >= 2) console.warn('[Renderer]', message);
+        else            console.log('[Renderer]', message);
+      }
+    });
+
     // ── Page load timeout — if no content after 15 s, offer to go back ──
     let loadResolved = false;
     view.webContents.once('did-finish-load', () => { loadResolved = true; });
@@ -523,17 +535,15 @@ function switchToServer(serverUrl) {
     });
 
     // ── Periodic memory monitoring ──
-    // Check the renderer's memory footprint every 10 s.  If it exceeds
-    // 200 MB, clear caches and reload to prevent the OOM crash the user
-    // has been seeing (FATAL ERROR: Oilpan: Large allocation).
-    // We also proactively tell the renderer to prune off-screen images
-    // once it crosses a warning threshold to avoid reaching the hard cap.
+    // Checks renderer memory every 30 s.  Hard reload at 200 MB, soft
+    // DOM trim at 150 MB.  Also tracks a trend log so we can diagnose
+    // progressive memory growth from the server console output.
     const MEM_THRESHOLD_MB = 200;
     const MEM_WARN_MB      = 150;
-    // Delay first memory check — give the page 30 s to finish initial render
-    // before monitoring, so the startup DOM build doesn't trigger a reload.
-    const MEM_CHECK_INTERVAL = 30000;  // 30 s (was 10 s — less frequent to reduce overhead)
+    const MEM_CHECK_INTERVAL = 30000;
     let _memCheckInterval = null;
+    const _memTrend = [];           // [{ts, mb}] — last 20 readings (~10 min)
+    const MEM_TREND_MAX = 20;
     const _startMemCheck = () => {
       _memCheckInterval = setInterval(async () => {
       if (!mainWindow || !serverViews.has(url)) {
@@ -548,6 +558,20 @@ function switchToServer(serverUrl) {
         // getProcessMemoryInfo returns { private, shared } in KB
         const memKB = metrics ? (metrics.private || 0) : 0;
         const memMB = memKB / 1024;
+
+        // Track trend
+        _memTrend.push({ ts: Date.now(), mb: Math.round(memMB) });
+        if (_memTrend.length > MEM_TREND_MAX) _memTrend.shift();
+
+        // Log trend every 5th reading (~2.5 min)
+        if (_memTrend.length % 5 === 0 && _memTrend.length >= 5) {
+          const first = _memTrend[0].mb;
+          const last  = _memTrend[_memTrend.length - 1].mb;
+          const delta = last - first;
+          const arrow = delta > 5 ? '↑' : delta < -5 ? '↓' : '→';
+          console.log(`[Haven Desktop] Memory trend: ${first}→${last} MB (${delta > 0 ? '+' : ''}${delta}) ${arrow} over ${Math.round((_memTrend[_memTrend.length-1].ts - _memTrend[0].ts)/60000)} min  [${_memTrend.map(r => r.mb).join(',')}]`);
+        }
+
         if (memMB > MEM_THRESHOLD_MB) {
           console.warn(`[Haven Desktop] Renderer memory ${Math.round(memMB)} MB exceeds ${MEM_THRESHOLD_MB} MB — clearing caches & reloading`);
           try { await view.webContents.session.clearCache(); } catch {}
