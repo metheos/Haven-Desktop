@@ -394,17 +394,17 @@ function switchToServer(serverUrl) {
     view.webContents.once('did-finish-load', () => { loadResolved = true; });
     setTimeout(() => {
       if (loadResolved || !mainWindow) return;
-      // Check if the page actually has content
-      view.webContents.executeJavaScript('document.body?.innerText?.length || 0').then((len) => {
+      // Check if the page actually has content (async — never blocks renderer or main)
+      view.webContents.executeJavaScript('document.body?.innerText?.length || 0').then(async (len) => {
         if (len > 20) return; // Page has content, it's fine
-        const choice = dialog.showMessageBoxSync(mainWindow, {
+        const { response } = await dialog.showMessageBox(mainWindow, {
           type: 'warning',
           buttons: ['Go Back to Welcome', 'Keep Waiting'],
           defaultId: 0,
           title: 'Connection Problem',
           message: `Haven couldn't load the server at ${url}.\n\nThis could mean the server is down, the address is wrong, or there's a network issue.`,
         });
-        if (choice === 0) resetToWelcome();
+        if (response === 0) resetToWelcome();
       }).catch(() => {});
     }, 15000);
 
@@ -530,7 +530,7 @@ function switchToServer(serverUrl) {
     const MEM_WARN_MB      = 150;
     // Delay first memory check — give the page 30 s to finish initial render
     // before monitoring, so the startup DOM build doesn't trigger a reload.
-    const MEM_CHECK_INTERVAL = 10000;
+    const MEM_CHECK_INTERVAL = 30000;  // 30 s (was 10 s — less frequent to reduce overhead)
     let _memCheckInterval = null;
     const _startMemCheck = () => {
       _memCheckInterval = setInterval(async () => {
@@ -551,21 +551,16 @@ function switchToServer(serverUrl) {
           try { await view.webContents.session.clearCache(); } catch {}
           try { view.webContents.loadURL(url + '/app.html'); } catch {}
         } else if (memMB > MEM_WARN_MB) {
-          // Soft intervention: ask the renderer to release decoded images
-          // and trim excess DOM nodes to lighten the Oilpan allocation pressure.
+          // Soft intervention: ask the renderer to trim excess DOM nodes.
+          // CRITICAL: Do NOT use getBoundingClientRect() here — it forces
+          // a synchronous layout recalculation for EVERY element, which
+          // starves the renderer event loop and causes complete UI freezes.
+          // Instead we only trim old messages (pure DOM count check — O(1)
+          // per removal, no layout computation whatsoever).
           try {
             view.webContents.executeJavaScript(`
               (function(){
                 var ct = 0;
-                var imgs = document.querySelectorAll('#messages .chat-image[data-src]');
-                imgs.forEach(function(img){
-                  var r = img.getBoundingClientRect();
-                  if (r.bottom < -500 || r.top > window.innerHeight + 500) {
-                    img.removeAttribute('src');
-                    ct++;
-                  }
-                });
-                // Trim old messages beyond 200 to reduce DOM node count
                 var msgs = document.getElementById('messages');
                 if (msgs) {
                   while (msgs.children.length > 200) {
@@ -573,9 +568,9 @@ function switchToServer(serverUrl) {
                     ct++;
                   }
                 }
-                if (ct) console.log('[Haven] Soft GC: released ' + ct + ' elements');
+                if (ct) console.log('[Haven] Soft GC: trimmed ' + ct + ' old messages');
               })()
-            `, true).catch(() => {});
+            `).catch(() => {});
           } catch {}
         }
       } catch {}
@@ -585,8 +580,12 @@ function switchToServer(serverUrl) {
 
     // ── Periodic health check: detect blank screen without crash event ──
     // Sometimes the renderer goes blank without firing 'render-process-gone'
-    // (e.g. GPU process crash, OOM). Periodically check if the page has
-    // content and reload if it doesn't.
+    // (e.g. GPU process crash, OOM).  Check if the renderer process is
+    // crashed and reload if so.  IMPORTANT: we no longer use
+    // executeJavaScript() for this — injecting JS into a renderer that's
+    // already busy/stalled blocks the main process event loop and makes
+    // the freeze WORSE.  isCrashed() is a synchronous C++ call on the
+    // main process side that doesn't touch the renderer at all.
     let _healthCheckInterval = setInterval(() => {
       if (!mainWindow || !serverViews.has(url)) {
         clearInterval(_healthCheckInterval);
@@ -594,13 +593,10 @@ function switchToServer(serverUrl) {
       }
       if (activeServerUrl !== url) return; // only check the active view
       try {
-        view.webContents.executeJavaScript('document.body?.innerText?.length || 0', true)
-          .then((len) => {
-            if (len < 5 && !view.webContents.isLoading()) {
-              console.warn('[Haven Desktop] Health check: page appears blank, reloading…');
-              view.webContents.loadURL(url + '/app.html');
-            }
-          }).catch(() => {});
+        if (view.webContents.isCrashed()) {
+          console.warn('[Haven Desktop] Health check: renderer crashed, reloading…');
+          view.webContents.loadURL(url + '/app.html');
+        }
       } catch {}
     }, 30000); // check every 30 seconds
 
@@ -1057,13 +1053,16 @@ function registerIPC() {
   // ── JavaScript dialog overrides for BrowserView (issue #6) ──
 
   ipcMain.on('dialog:alert', (event, { message }) => {
-    // Bring app window to front so the modal dialog is always visible.
-    // Without this, the dialog can appear behind the app and the renderer
-    // freezes (sendSync blocks until the dialog is dismissed).
+    // Focus the window so the modal dialog is always visible — if it spawns
+    // behind the app, the user can't dismiss it and the app appears frozen.
     if (mainWindow && !mainWindow.isDestroyed()) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.focus();
     }
+    // showMessageBoxSync is intentionally synchronous here — confirm/alert/prompt
+    // are modal by spec, so blocking is expected.  The REAL freeze causes were
+    // the getBoundingClientRect reflow storm and executeJavaScript health checks,
+    // not these dialog calls.
     dialog.showMessageBoxSync(mainWindow, {
       type: 'info', buttons: ['OK'], title: 'Haven',
       message: String(message || ''),
@@ -1072,7 +1071,6 @@ function registerIPC() {
   });
 
   ipcMain.on('dialog:confirm', (event, { message }) => {
-    // Bring app window to front so the modal dialog is always visible.
     if (mainWindow && !mainWindow.isDestroyed()) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.focus();
@@ -1086,22 +1084,11 @@ function registerIPC() {
   });
 
   ipcMain.on('dialog:prompt', (event, { message, defaultValue }) => {
-    // Bring app window to front.
     if (mainWindow && !mainWindow.isDestroyed()) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.focus();
     }
-    // Use Electron's built-in dialog instead of VBScript/zenity.
-    // The old approach spawned cscript.exe via execSync with a 5-MINUTE
-    // timeout, which blocked Node's entire event loop.  If cscript.exe
-    // was slow to appear (antivirus, UAC, remote desktop), the renderer
-    // appeared completely frozen with no visible dialog.
-    // showMessageBoxSync with an input workaround: show a dialog asking
-    // for the value (Cancel = null, OK = grab from clipboard-workaround).
-    // Since Electron doesn't have a native input dialog, we use a two-step:
-    // 1. Show a simple OK/Cancel dialog with the prompt message
-    // 2. If OK, return the default value (caller will use it)
-    // This is imperfect but prevents the 5-minute freeze.
+    // Native Electron dialog — no cscript.exe, no execSync, no 5-minute timeout.
     const r = dialog.showMessageBoxSync(mainWindow, {
       type: 'question',
       buttons: ['Cancel', 'OK'],

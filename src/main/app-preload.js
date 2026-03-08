@@ -29,108 +29,17 @@ window.addEventListener('DOMContentLoaded', () => {
 // main process which shows OS-native dialogs.
 // ═══════════════════════════════════════════════════════════
 
-// ── Async dialog replacements ─────────────────────────────
-// CRITICAL: The original sendSync versions blocked the renderer thread
-// completely while waiting for the main-process OS dialog.  If the OS
-// dialog appeared behind the app window (common on multi-monitor), the
-// entire renderer froze indefinitely — no repaints, no cursor changes,
-// no click handling.  The async replacements below keep the renderer
-// responsive by using a non-blocking HTML overlay instead.
+// ── Dialog overrides (confirm / alert / prompt) ───────────
+// BrowserView doesn't support native browser dialogs.  We forward them
+// to the main process via sendSync, which blocks the renderer while the
+// OS dialog is visible.  This is intentionally synchronous — confirm()
+// and prompt() are modal by spec and callers expect a return value.
 //
-// We monkey-patch confirm/alert/prompt so every call site in the web
-// app (30+ confirm() calls, etc.) automatically uses the safe path.
-
-// Helper: create a modal overlay that resolves a Promise
-function _createDialogOverlay({ message, type, defaultValue }) {
-  return new Promise(resolve => {
-    const overlay = document.createElement('div');
-    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:999999;backdrop-filter:blur(4px);';
-    const box = document.createElement('div');
-    box.style.cssText = 'background:var(--bg-card,#1a1a2e);border:1px solid var(--border-light,#333);border-radius:12px;padding:24px;max-width:420px;width:90%;color:var(--text-primary,#eee);font-family:inherit;box-shadow:0 12px 48px rgba(0,0,0,0.5);';
-    const msg = document.createElement('p');
-    msg.style.cssText = 'margin:0 0 16px 0;font-size:14px;line-height:1.5;white-space:pre-wrap;word-break:break-word;';
-    msg.textContent = message || '';
-    box.appendChild(msg);
-
-    let input = null;
-    if (type === 'prompt') {
-      input = document.createElement('input');
-      input.type = 'text';
-      input.value = defaultValue || '';
-      input.style.cssText = 'width:100%;box-sizing:border-box;padding:8px 10px;margin-bottom:16px;border-radius:6px;border:1px solid var(--border,#444);background:var(--bg-tertiary,#111);color:var(--text-primary,#eee);font-size:14px;outline:none;';
-      box.appendChild(input);
-    }
-
-    const actions = document.createElement('div');
-    actions.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;';
-
-    const btnStyle = 'padding:8px 18px;border-radius:6px;border:none;cursor:pointer;font-size:13px;font-weight:500;';
-
-    if (type === 'alert') {
-      const ok = document.createElement('button');
-      ok.textContent = 'OK';
-      ok.style.cssText = btnStyle + 'background:var(--accent,#8b6ff0);color:#fff;';
-      ok.onclick = () => { overlay.remove(); resolve(true); };
-      actions.appendChild(ok);
-      overlay.addEventListener('click', e => { if (e.target === overlay) { overlay.remove(); resolve(true); } });
-    } else if (type === 'confirm') {
-      const cancel = document.createElement('button');
-      cancel.textContent = 'Cancel';
-      cancel.style.cssText = btnStyle + 'background:var(--bg-tertiary,#222);color:var(--text-secondary,#aaa);';
-      cancel.onclick = () => { overlay.remove(); resolve(false); };
-      const ok = document.createElement('button');
-      ok.textContent = 'OK';
-      ok.style.cssText = btnStyle + 'background:var(--accent,#8b6ff0);color:#fff;';
-      ok.onclick = () => { overlay.remove(); resolve(true); };
-      actions.appendChild(cancel);
-      actions.appendChild(ok);
-      overlay.addEventListener('click', e => { if (e.target === overlay) { overlay.remove(); resolve(false); } });
-    } else if (type === 'prompt') {
-      const cancel = document.createElement('button');
-      cancel.textContent = 'Cancel';
-      cancel.style.cssText = btnStyle + 'background:var(--bg-tertiary,#222);color:var(--text-secondary,#aaa);';
-      cancel.onclick = () => { overlay.remove(); resolve(null); };
-      const ok = document.createElement('button');
-      ok.textContent = 'OK';
-      ok.style.cssText = btnStyle + 'background:var(--accent,#8b6ff0);color:#fff;';
-      ok.onclick = () => { overlay.remove(); resolve(input.value); };
-      actions.appendChild(cancel);
-      actions.appendChild(ok);
-      input.addEventListener('keydown', e => { if (e.key === 'Enter') ok.click(); if (e.key === 'Escape') cancel.click(); });
-      overlay.addEventListener('click', e => { if (e.target === overlay) { overlay.remove(); resolve(null); } });
-    }
-
-    box.appendChild(actions);
-    overlay.appendChild(box);
-    document.body.appendChild(overlay);
-    if (input) input.focus(); else if (actions.lastChild) actions.lastChild.focus();
-  });
-}
-
-// Async confirm — returns a Promise<boolean>
-// IMPORTANT: all call sites in Haven that use confirm() already handle
-// the return value synchronously (if (confirm(...)) { ... }).  Because
-// we're replacing with an async version, the if-block will see a truthy
-// Promise and always execute.  To fix this properly we'd need to rewrite
-// all 30+ call sites.  Instead, we use a BLOCKING approach: we show the
-// dialog and use a synchronous XMLHttpRequest sleep trick — NO.  That's
-// hacky.  Better approach: keep sendSync for confirm/alert but ensure
-// the main process ALWAYS brings the dialog window to front.
-//
-// FINAL APPROACH: Use IPC invoke (async) for prompt (which is the VBScript
-// danger), but keep sendSync for confirm/alert since those use native
-// Electron dialogs that are modal to mainWindow (always visible).
-// The key fix: ensure mainWindow.focus() before showing the dialog.
+// The main process focuses the app window before showing the dialog, so
+// it can't appear behind the app on multi-monitor setups (which would
+// make it impossible to dismiss and freeze the UI forever).
 
 window.prompt = (message, defaultValue) => {
-  // prompt() is inherently sync in the spec, but every call site in Haven
-  // that uses prompt() can tolerate null (cancel).  We show an in-renderer
-  // HTML dialog and return null synchronously — the async overlay will
-  // resolve later, but the caller already moved on.  For the few call
-  // sites that need the value, we patch them to use an async wrapper.
-  //
-  // Actually, the simplest safe fix: show the native dialog but with a
-  // short timeout so the renderer can't freeze for 5 minutes.
   return ipcRenderer.sendSync('dialog:prompt', {
     message: message || '',
     defaultValue: defaultValue || '',
