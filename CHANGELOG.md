@@ -1,5 +1,23 @@
 # Haven Desktop Changelog
 
+## v1.1.1
+
+### Bug Fixes
+- **Renderer freeze from sync dialog deadlocks** — `window.prompt()` was implemented via a VBScript `InputBox` spawned by `cscript.exe` with a 5-minute `execSync` timeout. If the dialog spawned behind the app window, the main process blocked for up to 5 minutes with no way to dismiss it. Replaced with a native Electron dialog that returns instantly. Also removed the `disable-renderer-backgrounding` Chromium flag, which was preventing timer throttling and starving the renderer event loop.
+- **Renderer freeze from reflow storm** — the memory-check soft GC was calling `getBoundingClientRect()` on every image via `executeJavaScript` every 10 seconds, forcing 50+ synchronous layout recalculations per cycle. Removed layout-triggering calls entirely; the soft GC now only trims DOM node count (O(1)). Health checks replaced `executeJavaScript` with `webContents.isCrashed()` to avoid blocking the main process.
+- **Progressive slowdown from memory pressure** — default V8 heap (384 MB) and GPU memory budget (128 MB) were too tight for Haven’s DOM-heavy UI with RGB theme cycling and embedded media, causing frequent GC pauses. V8 heap raised to 512 MB, GPU budget to 256 MB, and tray menu rebuild interval reduced from 10s to 60s.
+- **Soft-GC message trim cap misaligned** — the Electron soft GC trimmed messages to 200, but the client already caps at 100, leaving up to 100 stale messages (~1200 DOM nodes) that were never cleaned up. Aligned the cap to 100.
+
+### Added
+- **Memory trend tracking** — a rolling-window telemetry system samples renderer memory every 30 seconds and logs a trend summary every ~2.5 minutes (e.g. `Memory trend: 85→142 MB (+57) ↑ over 10 min`). Renderer-side `[Haven Perf]` console messages are forwarded to the main process for server-log visibility without needing DevTools.
+
+### Improved
+- **Zombie process cleanup** — the server manager now kills any leftover process holding the configured port before starting, preventing "port in use" failures after crashes.
+- **Server auto-restart** — if the server process exits unexpectedly, it restarts after 2 seconds with a cooldown to prevent loops.
+- **Crash recovery** — after exhausting retry attempts, the app now performs a full BrowserView tear-down and rebuild instead of giving up permanently.
+
+---
+
 ## v1.1.0
 
 ### Bug Fixes
