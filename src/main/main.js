@@ -61,9 +61,11 @@ app.commandLine.appendSwitch('disable-features', 'AutofillServerCommunication');
 
 // ── Memory management: keep the renderer lean ──────────────
 // The Oilpan OOM crash is in Chromium's C++ DOM-object allocator, which is
-// separate from V8's JS heap.  Lowering V8 to 384 MB leaves more address-
-// space for Oilpan, decoded images, and the GPU process.
-app.commandLine.appendSwitch('js-flags', '--max-old-space-size=384');
+// separate from V8's JS heap.  Raising V8 to 512 MB gives the RGB theme cycle,
+// canvas effects, and message rendering more headroom so the GC fires less
+// frequently (GC pauses were a significant contributor to the progressive
+// slowdown reported as "hover gets slower over 5 minutes").
+app.commandLine.appendSwitch('js-flags', '--max-old-space-size=512');
 // Reduce GPU process memory usage — Haven doesn't need heavy GPU compositing
 app.commandLine.appendSwitch('disable-gpu-memory-buffer-video-frames');
 // Limit image decode cache (large images/gifs can balloon memory)
@@ -74,7 +76,7 @@ app.commandLine.appendSwitch('image-decode-ct', '3');
 // This contributed to renderer freezes by starving the event loop.
 // Cap the GPU-process memory budget so decoded textures don't eat into
 // the reservation Oilpan needs for large DOM allocations.
-app.commandLine.appendSwitch('force-gpu-mem-available-mb', '128');
+app.commandLine.appendSwitch('force-gpu-mem-available-mb', '256');
 
 // ── State ─────────────────────────────────────────────────
 let mainWindow      = null;
@@ -772,7 +774,7 @@ function createTray() {
 
   rebuildMenu();
   // Refresh tray menu periodically so server status stays current
-  setInterval(rebuildMenu, 10000);
+  setInterval(rebuildMenu, 60000);
 
   tray.on('click', () => {
     const win = mainWindow || welcomeWindow;
