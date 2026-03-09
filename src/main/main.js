@@ -542,13 +542,15 @@ function switchToServer(serverUrl) {
     });
 
     // ── Periodic memory monitoring ──
-    // Checks renderer memory every 30 s.  Hard reload at 200 MB, soft
-    // DOM trim at 150 MB.  Also tracks a trend log so we can diagnose
-    // progressive memory growth from the server console output.
-    const MEM_THRESHOLD_MB = 200;
-    const MEM_WARN_MB      = 150;
+    // Checks renderer memory every 30 s.  Soft DOM trim at 300 MB,
+    // hard reload only at 512 MB with a 2 min cooldown to prevent
+    // reload loops on media-heavy channels.
+    const MEM_THRESHOLD_MB = 512;
+    const MEM_WARN_MB      = 300;
     const MEM_CHECK_INTERVAL = 30000;
+    const MEM_RELOAD_COOLDOWN = 120000; // 2 min between hard reloads
     let _memCheckInterval = null;
+    let _lastMemReload = 0;           // timestamp of last memory reload
     const _memTrend = [];           // [{ts, mb}] — last 20 readings (~10 min)
     const MEM_TREND_MAX = 20;
     let _memSampleCount = 0;        // total samples taken (for trend log cadence)
@@ -583,28 +585,40 @@ function switchToServer(serverUrl) {
         }
 
         if (memMB > MEM_THRESHOLD_MB) {
-          console.warn(`[Haven Desktop] Renderer memory ${Math.round(memMB)} MB exceeds ${MEM_THRESHOLD_MB} MB — clearing caches & reloading`);
-          try { view.webContents.session.clearCache().catch(() => {}); } catch {}
-          try { view.webContents.loadURL(url + '/app.html'); } catch {}
-        } else if (memMB > MEM_WARN_MB) {
-          // Soft intervention: ask the renderer to trim excess DOM nodes.
+          // Hard reload — but only if we haven't reloaded recently to prevent loops
+          if (Date.now() - _lastMemReload < MEM_RELOAD_COOLDOWN) {
+            console.warn(`[Haven Desktop] Memory ${Math.round(memMB)} MB — skipping reload (cooldown active), trimming DOM instead`);
+          } else {
+            console.warn(`[Haven Desktop] Renderer memory ${Math.round(memMB)} MB exceeds ${MEM_THRESHOLD_MB} MB — clearing caches & reloading`);
+            _lastMemReload = Date.now();
+            try { view.webContents.session.clearCache().catch(() => {}); } catch {}
+            try { view.webContents.loadURL(url + '/app.html'); } catch {}
+            return; // skip soft trim — we're reloading
+          }
+        }
+
+        if (memMB > MEM_WARN_MB) {
+          // Soft intervention: trim excess DOM nodes + revoke blob URLs.
           // CRITICAL: Do NOT use getBoundingClientRect() here — it forces
           // a synchronous layout recalculation for EVERY element, which
           // starves the renderer event loop and causes complete UI freezes.
-          // Instead we only trim old messages (pure DOM count check — O(1)
-          // per removal, no layout computation whatsoever).
           try {
             view.webContents.executeJavaScript(`
               (function(){
                 var ct = 0;
                 var msgs = document.getElementById('messages');
                 if (msgs) {
-                  while (msgs.children.length > 100) {
+                  while (msgs.children.length > 50) {
                     msgs.removeChild(msgs.firstElementChild);
                     ct++;
                   }
                 }
-                if (ct) console.log('[Haven] Soft GC: trimmed ' + ct + ' old messages');
+                // Strip heavy embeds (iframes, large images) from older messages
+                if (msgs) {
+                  var old = Array.from(msgs.querySelectorAll('.link-preview-yt, .link-preview'));
+                  old.slice(0, Math.max(0, old.length - 5)).forEach(function(el) { el.remove(); });
+                }
+                if (ct) console.log('[Haven] Soft GC: trimmed ' + ct + ' old messages + embeds');
               })()
             `).catch(() => {});
           } catch {}
