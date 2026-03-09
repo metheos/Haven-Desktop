@@ -533,6 +533,13 @@ function switchToServer(serverUrl) {
         try { view.webContents.loadURL(url + '/app.html'); } catch {}
       }, 5000);
     });
+    view.webContents.on('responsive', () => {
+      if (_unresponsiveTimer) {
+        clearTimeout(_unresponsiveTimer);
+        _unresponsiveTimer = null;
+        console.log(`[Haven Desktop] Renderer recovered for ${url}, cancelled reload`);
+      }
+    });
 
     // ── Periodic memory monitoring ──
     // Checks renderer memory every 30 s.  Hard reload at 200 MB, soft
