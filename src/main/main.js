@@ -544,27 +544,30 @@ function switchToServer(serverUrl) {
     let _memCheckInterval = null;
     const _memTrend = [];           // [{ts, mb}] — last 20 readings (~10 min)
     const MEM_TREND_MAX = 20;
+    let _memSampleCount = 0;        // total samples taken (for trend log cadence)
     const _startMemCheck = () => {
-      _memCheckInterval = setInterval(async () => {
+      _memCheckInterval = setInterval(() => {
       if (!mainWindow || !serverViews.has(url)) {
         clearInterval(_memCheckInterval);
         return;
       }
       if (activeServerUrl !== url) return; // only check active view
       try {
-        const metrics = view.webContents.getProcessMemoryInfo
-          ? await view.webContents.getProcessMemoryInfo()
-          : null;
-        // getProcessMemoryInfo returns { private, shared } in KB
-        const memKB = metrics ? (metrics.private || 0) : 0;
+        // Use app.getAppMetrics() to find renderer memory by PID —
+        // getProcessMemoryInfo().private returns 0 on some Electron/Windows combos.
+        const rendererPid = view.webContents.getOSProcessId();
+        const allMetrics = app.getAppMetrics();
+        const proc = allMetrics.find(m => m.pid === rendererPid);
+        const memKB = proc ? (proc.memory.workingSetSize || 0) : 0;
         const memMB = memKB / 1024;
 
         // Track trend
         _memTrend.push({ ts: Date.now(), mb: Math.round(memMB) });
         if (_memTrend.length > MEM_TREND_MAX) _memTrend.shift();
+        _memSampleCount++;
 
-        // Log trend every 5th reading (~2.5 min)
-        if (_memTrend.length % 5 === 0 && _memTrend.length >= 5) {
+        // Log trend every 5th sample (~2.5 min)
+        if (_memSampleCount % 5 === 0 && _memTrend.length >= 5) {
           const first = _memTrend[0].mb;
           const last  = _memTrend[_memTrend.length - 1].mb;
           const delta = last - first;
@@ -574,7 +577,7 @@ function switchToServer(serverUrl) {
 
         if (memMB > MEM_THRESHOLD_MB) {
           console.warn(`[Haven Desktop] Renderer memory ${Math.round(memMB)} MB exceeds ${MEM_THRESHOLD_MB} MB — clearing caches & reloading`);
-          try { await view.webContents.session.clearCache(); } catch {}
+          try { view.webContents.session.clearCache().catch(() => {}); } catch {}
           try { view.webContents.loadURL(url + '/app.html'); } catch {}
         } else if (memMB > MEM_WARN_MB) {
           // Soft intervention: ask the renderer to trim excess DOM nodes.
