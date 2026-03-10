@@ -1,5 +1,12 @@
 # Haven Desktop Changelog
 
+## v1.1.2
+
+### Updated
+- Bundled Haven server updated to v2.7.2, which fixes two scroll-position bugs: new root messages no longer leave the feed scrolled slightly short of the bottom, and switching channels / DMs now reliably lands at the latest message instead of a random earlier position.
+
+---
+
 ## v1.1.1
 
 ### Bug Fixes

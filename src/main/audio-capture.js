@@ -95,6 +95,17 @@ class AudioCaptureManager {
     this._callback  = null;
   }
 
+  /**
+   * Opt Haven's audio sessions out of Windows ducking.
+   * Call after audio starts playing (sessions must exist).
+   * @returns {number} number of sessions opted out
+   */
+  optOutOfDucking() {
+    if (!this._addon?.optOutOfDucking) return 0;
+    try { return this._addon.optOutOfDucking(); }
+    catch (e) { console.warn('[AudioCapture] optOutOfDucking:', e.message); return 0; }
+  }
+
   /** Release all resources. */
   cleanup() {
     this.stopCapture();

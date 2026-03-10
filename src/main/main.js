@@ -961,6 +961,7 @@ function registerIPC() {
   }));
   ipcMain.handle('audio:stop-capture',   () => audioCapture.stopCapture());
   ipcMain.handle('audio:is-supported',   () => audioCapture.isSupported());
+  ipcMain.handle('audio:opt-out-ducking', () => audioCapture.optOutOfDucking());
 
   // ── Audio Devices ─────────────────────────────────────
   ipcMain.handle('devices:get-inputs', async () => {

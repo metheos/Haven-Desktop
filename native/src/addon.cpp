@@ -107,6 +107,73 @@ static Napi::Value Cleanup(const Napi::CallbackInfo& info) {
     return info.Env().Undefined();
 }
 
+// ── optOutOfDucking() ──────────────────────────────────────
+// Finds audio sessions belonging to our own process and calls
+// SetDuckingPreference(TRUE) to prevent Windows from lowering
+// Haven Desktop's volume when WebRTC voice calls are active.
+#ifdef _WIN32
+#include <windows.h>
+#include <mmdeviceapi.h>
+#include <audiopolicy.h>
+
+static Napi::Value OptOutOfDucking(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    DWORD myPid = GetCurrentProcessId();
+    int opted = 0;
+
+    IMMDeviceEnumerator* enumerator = nullptr;
+    HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
+        CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), (void**)&enumerator);
+    if (FAILED(hr)) return Napi::Number::New(env, 0);
+
+    IMMDevice* device = nullptr;
+    hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
+    if (FAILED(hr)) { enumerator->Release(); return Napi::Number::New(env, 0); }
+
+    IAudioSessionManager2* mgr = nullptr;
+    hr = device->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr, (void**)&mgr);
+    if (FAILED(hr)) { device->Release(); enumerator->Release(); return Napi::Number::New(env, 0); }
+
+    IAudioSessionEnumerator* sessions = nullptr;
+    hr = mgr->GetSessionEnumerator(&sessions);
+    if (FAILED(hr)) { mgr->Release(); device->Release(); enumerator->Release(); return Napi::Number::New(env, 0); }
+
+    int count = 0;
+    sessions->GetCount(&count);
+
+    for (int i = 0; i < count; i++) {
+        IAudioSessionControl* ctrl = nullptr;
+        if (FAILED(sessions->GetSession(i, &ctrl))) continue;
+
+        IAudioSessionControl2* ctrl2 = nullptr;
+        if (FAILED(ctrl->QueryInterface(__uuidof(IAudioSessionControl2), (void**)&ctrl2))) {
+            ctrl->Release(); continue;
+        }
+
+        DWORD pid = 0;
+        ctrl2->GetProcessId(&pid);
+        if (pid == myPid) {
+            hr = ctrl2->SetDuckingPreference(TRUE);
+            if (SUCCEEDED(hr)) opted++;
+        }
+
+        ctrl2->Release();
+        ctrl->Release();
+    }
+
+    sessions->Release();
+    mgr->Release();
+    device->Release();
+    enumerator->Release();
+
+    return Napi::Number::New(env, opted);
+}
+#else
+static Napi::Value OptOutOfDucking(const Napi::CallbackInfo& info) {
+    return Napi::Number::New(info.Env(), 0);
+}
+#endif
+
 // ── Module init ────────────────────────────────────────────
 static Napi::Object Init(Napi::Env env, Napi::Object exports) {
     exports.Set("isSupported",           Napi::Function::New(env, IsSupported));
@@ -114,6 +181,7 @@ static Napi::Object Init(Napi::Env env, Napi::Object exports) {
     exports.Set("startCapture",          Napi::Function::New(env, StartCapture));
     exports.Set("stopCapture",           Napi::Function::New(env, StopCapture));
     exports.Set("cleanup",              Napi::Function::New(env, Cleanup));
+    exports.Set("optOutOfDucking",       Napi::Function::New(env, OptOutOfDucking));
     return exports;
 }
 
