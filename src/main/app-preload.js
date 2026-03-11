@@ -76,34 +76,38 @@ window.addEventListener('DOMContentLoaded', () => {
 (function patchFullscreen() {
   let _fullscreenEl = null;
 
-  // Inject the CSS that makes our manual fullscreen work
-  const style = document.createElement('style');
-  style.textContent = `
-    .haven-manual-fullscreen {
-      position: fixed !important;
-      top: 0 !important;
-      left: 0 !important;
-      width: 100vw !important;
-      height: 100vh !important;
-      max-width: unset !important;
-      max-height: unset !important;
-      z-index: 2147483647 !important;
-      background: #000 !important;
-      object-fit: contain !important;
-      margin: 0 !important;
-      padding: 0 !important;
-      border: none !important;
-      border-radius: 0 !important;
-    }
-  `;
-  (document.head || document.documentElement).appendChild(style);
+  // Inject the CSS that makes our manual fullscreen work.
+  // Deferred to DOMContentLoaded because the preload runs before &lt;head&gt; exists.
+  function injectStyle() {
+    const style = document.createElement('style');
+    style.textContent = `
+      .haven-manual-fullscreen {
+        position: fixed !important;
+        top: 0 !important;
+        left: 0 !important;
+        width: 100vw !important;
+        height: 100vh !important;
+        max-width: unset !important;
+        max-height: unset !important;
+        z-index: 2147483647 !important;
+        background: #000 !important;
+        object-fit: contain !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        border: none !important;
+        border-radius: 0 !important;
+      }
+    `;
+    document.head.appendChild(style);
+  }
+  if (document.head) injectStyle();
+  else window.addEventListener('DOMContentLoaded', injectStyle, { once: true });
 
   function enterFullscreen(el) {
     if (_fullscreenEl) exitFullscreen();
     _fullscreenEl = el;
     el.classList.add('haven-manual-fullscreen');
     ipcRenderer.send('window:enter-fullscreen');
-    // Fire the standard event so app code can react
     document.dispatchEvent(new Event('fullscreenchange'));
   }
 
