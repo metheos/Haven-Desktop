@@ -396,6 +396,16 @@ function switchToServer(serverUrl) {
 
     view.webContents.loadURL(url + '/app.html');
 
+    // ── HTML5 Fullscreen support for BrowserView ──────────────────
+    // requestFullscreen() inside a BrowserView does nothing unless the
+    // main process explicitly toggles the window's fullscreen state.
+    view.webContents.on('enter-html-full-screen', () => {
+      if (mainWindow) mainWindow.setFullScreen(true);
+    });
+    view.webContents.on('leave-html-full-screen', () => {
+      if (mainWindow) mainWindow.setFullScreen(false);
+    });
+
     // ── Forward renderer performance logs to main process console ──
     // The renderer's automatic perf diagnostics use console.warn/log with
     // a [Haven Perf] prefix.  Capture those here so they appear in the
