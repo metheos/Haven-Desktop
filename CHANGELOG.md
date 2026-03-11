@@ -1,5 +1,15 @@
 # Haven Desktop Changelog
 
+## v1.1.3
+
+### Fixed
+- **Fullscreen now actually works** — video fullscreen (from the native controls' button or the `...` menu), stream tile fullscreen buttons, and stream/webcam PiP overlay fullscreen buttons all failed silently inside Electron's BrowserView layer. Implemented a complete manual fullscreen override in the preload that intercepts `requestFullscreen()` calls and handles them via CSS + IPC, making fullscreen work everywhere in the app.
+- **WGC ProcessFrame log spam eliminated** — the terminal was flooded with `wgc_capture_session.cc ProcessFrame failed` errors during any voice/screen-share session. Switched from `--log-level=3` (browser process only) to `--disable-logging`, which suppresses Chromium C++ logging across all subprocesses including the GPU process where the spam originates.
+- **Screen sharing broken by preload crash** — a DOM injection in the fullscreen patch ran before the HTML document existed, throwing an error that silently killed the rest of the preload script. Screen sharing, notifications, and other Desktop features stopped working. Fixed by deferring the CSS injection to `DOMContentLoaded`.
+- **PiP permissions** — added `picture-in-picture` and `fullscreen` to Electron's session permission grants so native PiP controls display correctly.
+
+---
+
 ## v1.1.2
 
 ### Updated
