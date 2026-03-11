@@ -65,41 +65,93 @@ window.addEventListener('DOMContentLoaded', () => {
 // ═══════════════════════════════════════════════════════════
 // HTML5 Fullscreen API Override
 //
-// BrowserView does not natively support requestFullscreen().
-// The call resolves but nothing visually changes.  We override
-// the API so that entering/leaving fullscreen also toggles the
-// Electron window's fullscreen state via IPC.
+// BrowserView does not support the HTML5 Fullscreen API.
+// requestFullscreen() silently resolves but the element never
+// actually enters DOM fullscreen state — :fullscreen CSS never
+// applies and the visual doesn't change.  We implement fullscreen
+// entirely manually: a CSS class for visual fullscreen + IPC to
+// toggle the Electron window's native fullscreen.
 // ═══════════════════════════════════════════════════════════
 
 (function patchFullscreen() {
-  const origRequest = Element.prototype.requestFullscreen;
-  const origExit    = Document.prototype.exitFullscreen;
+  let _fullscreenEl = null;
 
-  Element.prototype.requestFullscreen = function (...args) {
+  // Inject the CSS that makes our manual fullscreen work
+  const style = document.createElement('style');
+  style.textContent = `
+    .haven-manual-fullscreen {
+      position: fixed !important;
+      top: 0 !important;
+      left: 0 !important;
+      width: 100vw !important;
+      height: 100vh !important;
+      max-width: unset !important;
+      max-height: unset !important;
+      z-index: 2147483647 !important;
+      background: #000 !important;
+      object-fit: contain !important;
+      margin: 0 !important;
+      padding: 0 !important;
+      border: none !important;
+      border-radius: 0 !important;
+    }
+  `;
+  (document.head || document.documentElement).appendChild(style);
+
+  function enterFullscreen(el) {
+    if (_fullscreenEl) exitFullscreen();
+    _fullscreenEl = el;
+    el.classList.add('haven-manual-fullscreen');
     ipcRenderer.send('window:enter-fullscreen');
-    return origRequest.apply(this, args).catch(() => {});
-  };
+    // Fire the standard event so app code can react
+    document.dispatchEvent(new Event('fullscreenchange'));
+  }
 
-  // Also patch the webkit prefix used by some older codepaths
+  function exitFullscreen() {
+    if (_fullscreenEl) {
+      _fullscreenEl.classList.remove('haven-manual-fullscreen');
+      _fullscreenEl = null;
+    }
+    ipcRenderer.send('window:leave-fullscreen');
+    document.dispatchEvent(new Event('fullscreenchange'));
+  }
+
+  // Override requestFullscreen
+  Element.prototype.requestFullscreen = function () {
+    enterFullscreen(this);
+    return Promise.resolve();
+  };
   if (Element.prototype.webkitRequestFullscreen) {
-    const origWebkit = Element.prototype.webkitRequestFullscreen;
-    Element.prototype.webkitRequestFullscreen = function (...args) {
-      ipcRenderer.send('window:enter-fullscreen');
-      return origWebkit.apply(this, args);
+    Element.prototype.webkitRequestFullscreen = function () {
+      enterFullscreen(this);
     };
   }
 
-  Document.prototype.exitFullscreen = function (...args) {
-    ipcRenderer.send('window:leave-fullscreen');
-    return origExit.apply(this, args).catch(() => {});
+  // Override exitFullscreen
+  Document.prototype.exitFullscreen = function () {
+    exitFullscreen();
+    return Promise.resolve();
   };
 
-  // Pressing Escape while in fullscreen — Chromium fires the exit event
-  // but the Electron window stays fullscreen.  Listen for the Escape key
-  // as a fallback so the window always exits fullscreen.
+  // Override document.fullscreenElement getter
+  Object.defineProperty(Document.prototype, 'fullscreenElement', {
+    get() { return _fullscreenEl; },
+    configurable: true,
+  });
+  Object.defineProperty(Document.prototype, 'webkitFullscreenElement', {
+    get() { return _fullscreenEl; },
+    configurable: true,
+  });
+  Object.defineProperty(Document.prototype, 'fullscreenEnabled', {
+    get() { return true; },
+    configurable: true,
+  });
+
+  // Escape key exits fullscreen
   window.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' || e.key === 'F11') {
-      ipcRenderer.send('window:leave-fullscreen');
+    if (e.key === 'Escape' && _fullscreenEl) {
+      e.preventDefault();
+      exitFullscreen();
     }
   }, true);
 })();

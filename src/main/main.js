@@ -59,10 +59,11 @@ if (store.get('forceSDR')) {
 // ── Suppress Chrome Autofill CDP warnings (harmless but noisy on startup) ──
 app.commandLine.appendSwitch('disable-features', 'AutofillServerCommunication');
 
-// ── Suppress Chromium stderr noise (WGC ProcessFrame spam, etc.) ──
-// log-level 3 = only FATAL errors reach stderr.  INFO/WARNING/ERROR C++ logs
-// (including the wgc_capture_session ProcessFrame flood) are silenced.
-app.commandLine.appendSwitch('log-level', '3');
+// ── Suppress Chromium stderr noise (WGC ProcessFrame spam, GPU errors, etc.) ──
+// disable-logging shuts down Chromium's logging system across ALL subprocesses
+// (browser, renderer, GPU).  --log-level only affects the browser process,
+// but the WGC ProcessFrame flood originates from the GPU process.
+app.commandLine.appendSwitch('disable-logging');
 
 // ── Memory management: keep the renderer lean ──────────────
 // The Oilpan OOM crash is in Chromium's C++ DOM-object allocator, which is
@@ -187,13 +188,13 @@ app.whenReady().then(async () => {
     }, 50);
   });
 
-  // Auto-grant camera, mic, and screen-share permissions for all server views
+  // Auto-grant camera, mic, screen-share, fullscreen, and PiP permissions for all server views
+  const ALLOWED_PERMS = ['media', 'mediaKeySystem', 'display-capture', 'notifications', 'fullscreen', 'window-management', 'picture-in-picture'];
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
-    const granted = ['media', 'mediaKeySystem', 'display-capture', 'notifications'].includes(permission);
-    callback(granted);
+    callback(ALLOWED_PERMS.includes(permission));
   });
   session.defaultSession.setPermissionCheckHandler((webContents, permission) => {
-    return ['media', 'mediaKeySystem', 'display-capture', 'notifications'].includes(permission);
+    return ALLOWED_PERMS.includes(permission);
   });
 
   registerIPC();
