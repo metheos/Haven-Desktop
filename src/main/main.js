@@ -59,6 +59,11 @@ if (store.get('forceSDR')) {
 // ── Suppress Chrome Autofill CDP warnings (harmless but noisy on startup) ──
 app.commandLine.appendSwitch('disable-features', 'AutofillServerCommunication');
 
+// ── Suppress Chromium stderr noise (WGC ProcessFrame spam, etc.) ──
+// log-level 3 = only FATAL errors reach stderr.  INFO/WARNING/ERROR C++ logs
+// (including the wgc_capture_session ProcessFrame flood) are silenced.
+app.commandLine.appendSwitch('log-level', '3');
+
 // ── Memory management: keep the renderer lean ──────────────
 // The Oilpan OOM crash is in Chromium's C++ DOM-object allocator, which is
 // separate from V8's JS heap.  Raising V8 to 512 MB gives the RGB theme cycle,
