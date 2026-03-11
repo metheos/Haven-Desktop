@@ -62,6 +62,48 @@ window.addEventListener('DOMContentLoaded', () => {
   try { localStorage.removeItem('haven_voice_channel'); } catch {}
 });
 
+// ═══════════════════════════════════════════════════════════
+// HTML5 Fullscreen API Override
+//
+// BrowserView does not natively support requestFullscreen().
+// The call resolves but nothing visually changes.  We override
+// the API so that entering/leaving fullscreen also toggles the
+// Electron window's fullscreen state via IPC.
+// ═══════════════════════════════════════════════════════════
+
+(function patchFullscreen() {
+  const origRequest = Element.prototype.requestFullscreen;
+  const origExit    = Document.prototype.exitFullscreen;
+
+  Element.prototype.requestFullscreen = function (...args) {
+    ipcRenderer.send('window:enter-fullscreen');
+    return origRequest.apply(this, args).catch(() => {});
+  };
+
+  // Also patch the webkit prefix used by some older codepaths
+  if (Element.prototype.webkitRequestFullscreen) {
+    const origWebkit = Element.prototype.webkitRequestFullscreen;
+    Element.prototype.webkitRequestFullscreen = function (...args) {
+      ipcRenderer.send('window:enter-fullscreen');
+      return origWebkit.apply(this, args);
+    };
+  }
+
+  Document.prototype.exitFullscreen = function (...args) {
+    ipcRenderer.send('window:leave-fullscreen');
+    return origExit.apply(this, args).catch(() => {});
+  };
+
+  // Pressing Escape while in fullscreen — Chromium fires the exit event
+  // but the Electron window stays fullscreen.  Listen for the Escape key
+  // as a fallback so the window always exits fullscreen.
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' || e.key === 'F11') {
+      ipcRenderer.send('window:leave-fullscreen');
+    }
+  }, true);
+})();
+
 // ─── Internal state ──────────────────────────────────────
 let _audioWorkletNode    = null;
 let _audioCtx            = null;
