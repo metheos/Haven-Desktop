@@ -614,7 +614,7 @@ function switchToServer(serverUrl) {
                 var ct = 0;
                 var msgs = document.getElementById('messages');
                 if (msgs) {
-                  while (msgs.children.length > 50) {
+                  while (msgs.children.length > 200) {
                     msgs.removeChild(msgs.firstElementChild);
                     ct++;
                   }
