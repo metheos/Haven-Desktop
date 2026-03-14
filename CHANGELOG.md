@@ -1,5 +1,16 @@
 # Haven Desktop Changelog
 
+## v1.1.4
+
+### New Features
+- **Start Hidden to Tray** — when "Start on Login" is enabled, a new "Start Hidden to Tray" option lets the app launch minimized to the system tray instead of opening a window. Both options are in Settings → Desktop App.
+- **Voice join/leave OS notifications** — the desktop app now shows native OS notifications when someone joins or leaves a voice channel you're in.
+
+### Fixed
+- **Settings sections not visible** — the Shortcuts and Desktop App sections in Settings were showing in the navigation but the actual content panels stayed hidden. Both now display correctly when running in the desktop app.
+
+---
+
 ## v1.1.3
 
 ### Fixed

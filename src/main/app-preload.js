@@ -595,6 +595,7 @@ window.havenDesktop = {
   prefs: {
     get:              ()      => ipcRenderer.invoke('desktop:get-prefs'),
     setStartOnLogin:  (v)     => ipcRenderer.invoke('desktop:set-start-on-login', v),
+    setStartHidden:   (v)     => ipcRenderer.invoke('desktop:set-start-hidden', v),
     setMinimizeToTray:(v)     => ipcRenderer.invoke('desktop:set-minimize-to-tray', v),
     setForceSDR:      (v)     => ipcRenderer.invoke('desktop:set-force-sdr', v),
   },

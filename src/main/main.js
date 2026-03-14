@@ -25,7 +25,8 @@ if (process.platform === 'linux') {
 }
 
 const IS_DEV    = process.argv.includes('--dev');
-const SHOW_SERVER = process.argv.includes('--show-server');
+const SHOW_SERVER  = process.argv.includes('--show-server');
+const START_HIDDEN = process.argv.includes('--hidden');
 const ICON_PATH = path.join(__dirname, '..', '..', 'assets', 'icon.png');
 
 // ── Persistent Store ──────────────────────────────────────
@@ -46,6 +47,7 @@ const store = new Store({
       ptt:    '',                           // push-to-talk (empty = disabled)
     },
     startOnLogin:   false,    // launch Haven Desktop on OS login
+    startHidden:    false,    // start minimized to tray (when startOnLogin is enabled)
     minimizeToTray: false,    // close button hides to tray instead of quitting
     forceSDR:       false,    // force sRGB color profile (fixes HDR over-saturation)
   },
@@ -151,7 +153,12 @@ app.whenReady().then(async () => {
   badgeIcon     = createBadgeIcon();
 
   // ── Sync start-on-login with OS ──────────────────────
-  app.setLoginItemSettings({ openAtLogin: !!store.get('startOnLogin') });
+  const loginEnabled = !!store.get('startOnLogin');
+  const hiddenArg    = store.get('startHidden') ? ['--hidden'] : [];
+  app.setLoginItemSettings({
+    openAtLogin: loginEnabled,
+    args: loginEnabled ? hiddenArg : [],
+  });
 
   // ── Auto-update check (issue #3) ──────────────────────
   if (autoUpdater) {
@@ -365,9 +372,11 @@ function createAppWindow(serverUrl) {
 
   switchToServer(serverUrl);
 
-  if (!mainWindow.isVisible()) {
+  if (!mainWindow.isVisible() && !START_HIDDEN) {
     mainWindow.show();
     if (welcomeWindow) welcomeWindow.close();
+  } else if (START_HIDDEN && welcomeWindow) {
+    welcomeWindow.close();
   }
 }
 
@@ -1055,7 +1064,7 @@ function registerIPC() {
   const ALLOWED_SETTINGS_KEYS = new Set([
     'userPrefs', 'windowBounds', 'audioInputDevice', 'audioOutputDevice',
     'lastServer', 'pushToTalk', 'pushToTalkKey', 'noiseGate', 'noiseThreshold',
-    'desktopShortcuts', 'startOnLogin', 'minimizeToTray', 'forceSDR'
+    'desktopShortcuts', 'startOnLogin', 'startHidden', 'minimizeToTray', 'forceSDR'
   ]);
   ipcMain.handle('settings:get', (_e, key)        => store.get(key));
   ipcMain.handle('settings:set', (_e, key, value)  => {
@@ -1070,13 +1079,31 @@ function registerIPC() {
   // ── Desktop App Preferences ───────────────────────────
   ipcMain.handle('desktop:get-prefs', () => ({
     startOnLogin:   !!store.get('startOnLogin'),
+    startHidden:    !!store.get('startHidden'),
     minimizeToTray: !!store.get('minimizeToTray'),
     forceSDR:       !!store.get('forceSDR'),
   }));
 
   ipcMain.handle('desktop:set-start-on-login', (_e, enabled) => {
     store.set('startOnLogin', !!enabled);
-    app.setLoginItemSettings({ openAtLogin: !!enabled });
+    const hiddenArg = store.get('startHidden') ? ['--hidden'] : [];
+    app.setLoginItemSettings({
+      openAtLogin: !!enabled,
+      args: enabled ? hiddenArg : [],
+    });
+    return true;
+  });
+
+  ipcMain.handle('desktop:set-start-hidden', (_e, enabled) => {
+    store.set('startHidden', !!enabled);
+    // Re-sync login item args so --hidden is included/excluded
+    const loginEnabled = !!store.get('startOnLogin');
+    if (loginEnabled) {
+      app.setLoginItemSettings({
+        openAtLogin: true,
+        args: enabled ? ['--hidden'] : [],
+      });
+    }
     return true;
   });
 
