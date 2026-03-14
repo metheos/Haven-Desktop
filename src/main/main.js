@@ -1020,6 +1020,18 @@ function registerIPC() {
     const anyUnread = [...serverBadgeState.values()].some(v => v);
     if (anyUnread) setNotificationBadge();
     else clearNotificationBadge();
+
+    // Notify the active BrowserView so it can show notification dots on server icons
+    const active = getActiveContents();
+    if (active && active !== e.sender) {
+      const badgeMap = Object.fromEntries(serverBadgeState);
+      safeSend(active, 'server-badge-update', badgeMap);
+    }
+  });
+
+  // ── Query per-server badge state (renderer asks for current state) ──
+  ipcMain.handle('get-server-badges', () => {
+    return Object.fromEntries(serverBadgeState);
   });
 
   // ── Window Controls ───────────────────────────────────

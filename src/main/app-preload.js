@@ -169,6 +169,11 @@ ipcRenderer.on('voice:mute-toggle',   () => document.getElementById('voice-mute-
 ipcRenderer.on('voice:deafen-toggle', () => document.getElementById('voice-deafen-btn')?.click());
 ipcRenderer.on('voice:ptt-toggle',    () => document.getElementById('voice-mute-btn')?.click());
 
+// ─── Server badge state updates from main process ────────
+ipcRenderer.on('server-badge-update', (_event, badgeMap) => {
+  window.dispatchEvent(new CustomEvent('haven-server-badges', { detail: badgeMap }));
+});
+
 // ─── Forward server log messages to the browser console ──
 ipcRenderer.on('server:log', (_event, msg) => {
   console.log('[Haven Server]', msg.trimEnd());
@@ -593,6 +598,9 @@ window.havenDesktop = {
     setMinimizeToTray:(v)     => ipcRenderer.invoke('desktop:set-minimize-to-tray', v),
     setForceSDR:      (v)     => ipcRenderer.invoke('desktop:set-force-sdr', v),
   },
+
+  /** Query per-server unread badge state for notification dots */
+  getServerBadges: () => ipcRenderer.invoke('get-server-badges'),
 };
 
 console.log('[Haven Desktop] App preload ready — per-app audio & enhanced features active');
