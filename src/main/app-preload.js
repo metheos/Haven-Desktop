@@ -164,6 +164,8 @@ window.addEventListener('DOMContentLoaded', () => {
 let _audioWorkletNode    = null;
 let _audioCtx            = null;
 let _audioDestination    = null;
+let _capturedAudioPid    = null;
+let _audioBufferQueue    = [];
 // ─── Global voice shortcut triggers ──────────────────────
 ipcRenderer.on('voice:mute-toggle',   () => document.getElementById('voice-mute-btn')?.click());
 ipcRenderer.on('voice:deafen-toggle', () => document.getElementById('voice-deafen-btn')?.click());
@@ -517,7 +519,7 @@ document.addEventListener('DOMContentLoaded', installGetDisplayMediaOverride);
 
 class HavenNotification {
   constructor(title, opts = {}) {
-    ipcRenderer.invoke('notify', { title, body: opts.body || '', silent: opts.silent || false });
+    ipcRenderer.invoke('notify', { title, body: opts.body || '', silent: opts.silent || false, channelCode: opts.channelCode });
     this._onclick = null;
   }
   set onclick(fn) { this._onclick = fn; }
@@ -527,6 +529,13 @@ class HavenNotification {
   static requestPermission() { return Promise.resolve('granted'); }
 }
 window.Notification = HavenNotification;
+
+// When user clicks a native notification, navigate to the channel
+ipcRenderer.on('notification-clicked', (_e, channelCode) => {
+  if (channelCode && window.app?.switchChannel) {
+    window.app.switchChannel(channelCode);
+  }
+});
 
 // ═══════════════════════════════════════════════════════════
 //  Exposed API  (window.havenDesktop)

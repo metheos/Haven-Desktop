@@ -998,7 +998,7 @@ function registerIPC() {
   });
 
   // ── Notifications ─────────────────────────────────────
-  ipcMain.handle('notify', (_e, opts) => {
+  ipcMain.handle('notify', (e, opts) => {
     const n = new Notification({
       title: opts.title || 'Haven',
       body:  opts.body  || '',
@@ -1006,11 +1006,18 @@ function registerIPC() {
       silent: opts.silent || false,
     });
     n.show();
-    n.on('click', () => { mainWindow?.show(); mainWindow?.focus(); });
+    n.on('click', () => {
+      mainWindow?.show();
+      mainWindow?.focus();
+      // Tell the renderer which channel to navigate to
+      if (opts.channelCode) {
+        try { e.sender.send('notification-clicked', opts.channelCode); } catch {}
+      }
+    });
 
-    // Set badge whenever a native notification fires; setNotificationBadge()
-    // now handles isFocused internally for flashFrame only.
-    if (mainWindow) setNotificationBadge();
+    // Badge is managed exclusively by the renderer via 'notification-badge' IPC.
+    // Setting it here caused a race: the renderer would clear the badge (unreads=0)
+    // right before notify() re-set it, leaving a phantom taskbar badge forever.
     return true;
   });
 

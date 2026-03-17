@@ -1,5 +1,12 @@
 # Haven Desktop Changelog
 
+## v1.1.5
+
+### Fixed
+- **Notification click now navigates to the right channel** — clicking a native OS notification now opens the app and switches to the channel or DM where the message was sent, instead of just bringing the window to focus.
+
+---
+
 ## v1.1.4
 
 ### New Features
