@@ -590,13 +590,16 @@ function switchToServer(serverUrl) {
         if (_memTrend.length > MEM_TREND_MAX) _memTrend.shift();
         _memSampleCount++;
 
-        // Log trend every 5th sample (~2.5 min)
+        // Log trend every 5th sample (~2.5 min), but only when memory changed significantly
         if (_memSampleCount % 5 === 0 && _memTrend.length >= 5) {
           const first = _memTrend[0].mb;
           const last  = _memTrend[_memTrend.length - 1].mb;
           const delta = last - first;
-          const arrow = delta > 5 ? '↑' : delta < -5 ? '↓' : '→';
-          console.log(`[Haven Desktop] Memory trend: ${first}→${last} MB (${delta > 0 ? '+' : ''}${delta}) ${arrow} over ${Math.round((_memTrend[_memTrend.length-1].ts - _memTrend[0].ts)/60000)} min  [${_memTrend.map(r => r.mb).join(',')}]`);
+          // Only log if memory shifted by more than 10 MB
+          if (Math.abs(delta) > 10) {
+            const arrow = delta > 0 ? '↑' : '↓';
+            console.log(`[Haven Desktop] Memory trend: ${first}→${last} MB (${delta > 0 ? '+' : ''}${delta}) ${arrow} over ${Math.round((_memTrend[_memTrend.length-1].ts - _memTrend[0].ts)/60000)} min`);
+          }
         }
 
         if (memMB > MEM_THRESHOLD_MB) {
