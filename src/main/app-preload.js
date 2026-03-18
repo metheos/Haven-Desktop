@@ -191,6 +191,9 @@ ipcRenderer.on('audio:capture-data', (_event, pcmData) => {
 
   if (_audioWorkletNode) {
     _audioWorkletNode.port.postMessage({ type: 'audio-data', samples });
+  } else if (window._havenAppAudioPush) {
+    // ScriptProcessorNode fallback path
+    window._havenAppAudioPush(samples);
   } else {
     _audioBufferQueue.push(samples);
   }
@@ -353,14 +356,22 @@ function showScreenPicker(sources, audioApps) {
     // Restore focus to the main window content (prevents Wayland focus loss)
     try { document.body?.focus(); window.focus(); } catch {}
 
+    let effectiveAudioPid = selAudioPid;
     if (!cancelled && selAudioPid && selAudioPid !== 'none') {
       _capturedAudioPid = selAudioPid;
       // Build the audio pipeline BEFORE sending the picker result,
       // so the per-app track is ready when getDisplayMedia resolves.
-      await buildAudioPipeline();
+      const pipelineOk = await buildAudioPipeline();
+      if (!pipelineOk) {
+        // Pipeline failed — fall back to system loopback so the user
+        // at least gets some audio rather than complete silence.
+        console.warn('[Haven Desktop] Per-app audio unavailable, falling back to system audio');
+        _capturedAudioPid = null;
+        effectiveAudioPid = null;
+      }
     }
 
-    ipcRenderer.send('screen:picker-result', cancelled ? { cancelled: true } : { sourceId: selSource, audioAppPid: selAudioPid });
+    ipcRenderer.send('screen:picker-result', cancelled ? { cancelled: true } : { sourceId: selSource, audioAppPid: effectiveAudioPid });
   };
 
   document.getElementById('hsp-cancel').onclick = () => dismiss(true);
@@ -382,8 +393,12 @@ function showScreenPicker(sources, audioApps) {
 // ═══════════════════════════════════════════════════════════
 
 async function buildAudioPipeline() {
+  // Try AudioWorklet first, fall back to ScriptProcessorNode if it fails
+  // (AudioWorklet blob URLs can fail in some Electron/BrowserView contexts)
   try {
     _audioCtx = new AudioContext({ sampleRate: 48000 });
+    // Explicitly resume — BrowserView contexts may start suspended
+    if (_audioCtx.state === 'suspended') await _audioCtx.resume();
 
     // Inline AudioWorklet processor (blob URL avoids CSP / file issues)
     const workletSrc = `
@@ -449,9 +464,75 @@ async function buildAudioPipeline() {
     window._havenAppAudioTrack  = _audioDestination.stream.getAudioTracks()[0];
     window._havenAppAudioStream = _audioDestination.stream;
 
-    console.log('[Haven Desktop] Per-app audio pipeline active');
+    console.log('[Haven Desktop] Per-app audio pipeline active (AudioWorklet)');
+    return true;
   } catch (err) {
-    console.error('[Haven Desktop] Audio pipeline setup failed:', err);
+    console.warn('[Haven Desktop] AudioWorklet pipeline failed, trying ScriptProcessor fallback:', err.message);
+    // Clean up partial AudioWorklet state before fallback
+    _audioWorkletNode = null;
+    if (_audioCtx) { _audioCtx.close().catch(() => {}); _audioCtx = null; }
+    _audioDestination = null;
+  }
+
+  // ── Fallback: ScriptProcessorNode (works in all Electron versions) ──
+  try {
+    _audioCtx = new AudioContext({ sampleRate: 48000 });
+    if (_audioCtx.state === 'suspended') await _audioCtx.resume();
+
+    const bufSize = 4096;
+    const scriptNode = _audioCtx.createScriptProcessor(bufSize, 1, 2);
+    const ring   = new Float32Array(96000);
+    let   wPos   = 0;
+    let   rPos   = 0;
+    let   avail  = 0;
+
+    // Store a push function that the IPC handler can call
+    window._havenAppAudioPush = (samples) => {
+      for (let i = 0; i < samples.length; i++) {
+        ring[wPos] = samples[i];
+        wPos = (wPos + 1) % ring.length;
+      }
+      avail = Math.min(avail + samples.length, ring.length);
+    };
+
+    scriptNode.onaudioprocess = (e) => {
+      const out = e.outputBuffer.getChannelData(0);
+      if (avail < out.length) { out.fill(0); } else {
+        for (let i = 0; i < out.length; i++) {
+          out[i] = ring[rPos];
+          rPos = (rPos + 1) % ring.length;
+        }
+        avail -= out.length;
+      }
+      // Copy mono to stereo
+      const out1 = e.outputBuffer.getChannelData(1);
+      out1.set(out);
+    };
+
+    _audioDestination = _audioCtx.createMediaStreamDestination();
+    scriptNode.connect(_audioDestination);
+    // Keep scriptNode alive by connecting to context destination (silenced)
+    const silencer = _audioCtx.createGain();
+    silencer.gain.value = 0;
+    scriptNode.connect(silencer);
+    silencer.connect(_audioCtx.destination);
+
+    // Flush buffered PCM
+    _audioBufferQueue.forEach(buf => window._havenAppAudioPush(buf));
+    _audioBufferQueue = [];
+
+    window._havenAppAudioTrack  = _audioDestination.stream.getAudioTracks()[0];
+    window._havenAppAudioStream = _audioDestination.stream;
+
+    console.log('[Haven Desktop] Per-app audio pipeline active (ScriptProcessor fallback)');
+    return true;
+  } catch (err) {
+    console.error('[Haven Desktop] Audio pipeline setup failed completely:', err);
+    // Clean up on total failure
+    if (_audioCtx) { _audioCtx.close().catch(() => {}); _audioCtx = null; }
+    _audioDestination = null;
+    window._havenAppAudioPush = null;
+    return false;
   }
 }
 
@@ -465,6 +546,7 @@ function teardownAudioPipeline() {
   _audioBufferQueue = [];
   window._havenAppAudioTrack  = null;
   window._havenAppAudioStream = null;
+  window._havenAppAudioPush   = null;
   ipcRenderer.invoke('audio:stop-capture').catch(() => {});
 }
 
