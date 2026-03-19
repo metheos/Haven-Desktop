@@ -453,6 +453,13 @@ async function buildAudioPipeline() {
 
     _audioDestination = _audioCtx.createMediaStreamDestination();
     _audioWorkletNode.connect(_audioDestination);
+    // Also connect to AudioContext.destination (silenced) so Chromium's
+    // audio thread actually drives the AudioWorklet process() callback.
+    // Without this, MediaStreamDestination alone may not pump the graph.
+    const silencer = _audioCtx.createGain();
+    silencer.gain.value = 0;
+    _audioWorkletNode.connect(silencer);
+    silencer.connect(_audioCtx.destination);
 
     // Flush any PCM that arrived before the pipeline was ready
     _audioBufferQueue.forEach(buf =>
