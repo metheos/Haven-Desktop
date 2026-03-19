@@ -1,5 +1,13 @@
 # Haven Desktop Changelog
 
+## v1.1.6
+
+### Fixed
+- **Per-application audio pipeline fallback** (#165) — per-app audio capture failed silently in some Electron BrowserView environments where AudioWorklet blob URLs were blocked. Added a ScriptProcessorNode fallback when AudioWorklet fails, explicit AudioContext.resume() for suspended contexts, and a final fallback to system loopback audio if the entire pipeline fails.
+- **Reduced memory trend log spam** — memory usage delta logs now only print when the change exceeds 10 MB, cutting down unnecessary console output.
+
+---
+
 ## v1.1.5
 
 ### Fixed
