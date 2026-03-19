@@ -420,7 +420,25 @@ function switchToServer(serverUrl) {
 
     // ── Page load timeout — if no content after 15 s, offer to go back ──
     let loadResolved = false;
-    view.webContents.once('did-finish-load', () => { loadResolved = true; });
+    view.webContents.once('did-finish-load', async () => {
+      loadResolved = true;
+      // Check that the page is actually a Haven server by looking for a
+      // Haven-specific element. Catches the case where the server URL now
+      // points to a reverse proxy error page or a completely different site.
+      const isHaven = await view.webContents.executeJavaScript(
+        '!!document.getElementById("app-body")'
+      ).catch(() => false);
+      if (!isHaven && mainWindow && !mainWindow.isDestroyed()) {
+        const { response } = await dialog.showMessageBox(mainWindow, {
+          type: 'warning',
+          buttons: ['Change Server', 'Keep Loading'],
+          defaultId: 0,
+          title: 'Haven Not Found',
+          message: `The page at ${url} doesn't look like a Haven server.\n\nThis can happen if the server moved to a new address or the URL is wrong.`,
+        });
+        if (response === 0) resetToWelcome(true);
+      }
+    });
     setTimeout(() => {
       if (loadResolved || !mainWindow) return;
       // Check if the page actually has content (async — never blocks renderer or main)
@@ -831,6 +849,7 @@ function createTray() {
       { label: `Haven Desktop v${app.getVersion()}`, enabled: false },
       { type: 'separator' },
       { label: 'Show Haven', click: () => { (mainWindow || welcomeWindow)?.show(); (mainWindow || welcomeWindow)?.focus(); } },
+      ...(mainWindow ? [{ label: 'Change Server', click: () => resetToWelcome(true) }] : []),
       { type: 'separator' },
       { label: running ? '● Server Running' : '○ Server Stopped', enabled: false },
       { type: 'separator' },
