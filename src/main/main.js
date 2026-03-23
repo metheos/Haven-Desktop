@@ -346,6 +346,22 @@ function createAppWindow(serverUrl) {
     mainWindow.on('resize', saveBounds);
     mainWindow.on('move',   saveBounds);
 
+    // ── Keep all BrowserViews sized to the content area ──
+    // setAutoResize can drift during fullscreen transitions; an explicit
+    // handler guarantees every view fills the window exactly.
+    const resyncViews = () => {
+      if (!mainWindow) return;
+      const [w, h] = mainWindow.getContentSize();
+      for (const view of serverViews.values()) {
+        view.setBounds({ x: 0, y: 0, width: w, height: h });
+      }
+    };
+    mainWindow.on('resize', resyncViews);
+    mainWindow.on('enter-full-screen',  resyncViews);
+    mainWindow.on('leave-full-screen',  resyncViews);
+    mainWindow.on('maximize',  resyncViews);
+    mainWindow.on('unmaximize', resyncViews);
+
     // ── Minimize-to-tray: intercept close if enabled ──
     mainWindow.on('close', (e) => {
       if (!app.isQuitting && store.get('minimizeToTray')) {
