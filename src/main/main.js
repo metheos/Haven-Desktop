@@ -367,7 +367,13 @@ function createAppWindow(serverUrl) {
       }
     });
     mainWindow.on('maximize',  resyncViews);
-    mainWindow.on('unmaximize', resyncViews);
+    mainWindow.on('unmaximize', () => {
+      resyncViews();
+      // Defer a second pass — getContentSize() can return stale values
+      // while the OS is still animating the window back to its restored size.
+      setTimeout(resyncViews, 150);
+      setTimeout(resyncViews, 400);
+    });
 
     // ── Minimize-to-tray: intercept close if enabled ──
     mainWindow.on('close', (e) => {
@@ -527,8 +533,28 @@ function switchToServer(serverUrl) {
       } catch {}
     });
 
-    // Intercept window.open → switch servers or open external
+    // Intercept window.open → switch servers or open external.
+    // Same-origin popups (e.g. game pop-out) open in a real child window;
+    // cross-origin links go to the system browser.
     view.webContents.setWindowOpenHandler(({ url: openUrl }) => {
+      try {
+        const parsedOpen = new URL(openUrl);
+        const parsedServer = new URL(url);
+        if (parsedOpen.origin === parsedServer.origin) {
+          return {
+            action: 'allow',
+            overrideBrowserWindowOptions: {
+              width: 800,
+              height: 900,
+              autoHideMenuBar: true,
+              webPreferences: {
+                contextIsolation: true,
+                nodeIntegration: false,
+              }
+            }
+          };
+        }
+      } catch {}
       handleWindowOpen(openUrl);
       return { action: 'deny' };
     });

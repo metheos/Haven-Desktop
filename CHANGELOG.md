@@ -1,5 +1,13 @@
 # Haven Desktop Changelog
 
+## v1.1.7
+
+### Fixed
+- **Game pop-out blocked in desktop** — the "Pop Out" button on games (e.g. Shippy Container) was blocked because Electron denied all `window.open` calls. Same-origin popups now open in a real child window.
+- **Gray box after un-maximizing** — double-clicking the title bar to restore from maximized could leave a gray/purple box covering part of the app because `getContentSize()` returned stale values during the OS animation. The BrowserView now re-syncs after a delay, matching the existing fullscreen exit behavior.
+
+---
+
 ## v1.1.6
 
 ### Fixed
