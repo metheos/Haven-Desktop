@@ -1,5 +1,16 @@
 # Haven Desktop Changelog
 
+## v1.1.8
+
+### Fixed
+- **MP4 fullscreen regression** — v1.1.7's deferred BrowserView resync on un-maximize fired during fullscreen transitions (Windows fires `unmaximize` when leaving fullscreen), stomping the overlay with stale dimensions. Added a fullscreen transition guard so the deferred calls are skipped during/after fullscreen exit.
+- **Gray/purple box after un-maximize** — the deferred resync now also sends a renderer-side `resize` event to force CSS viewport recalculation, eliminating the gray strip left by stale `100vh` values.
+- **"Haven Not Found" false positive on login pages** — the isHaven check only looked for `#app-body` which doesn't exist on the Haven login page. Now also recognizes `.auth-page` and Haven page titles, so connecting to a friend's server no longer falsely triggers the "not a Haven server" dialog.
+- **Server switching destroys session** — clicking a friend's server icon and encountering any issue (load timeout, non-Haven page) offered "Change Server" which wiped all preferences and returned to the Welcome screen. Secondary server failures now offer "Go Back to My Server" and cleanly return to the primary server without resetting anything.
+- **Tray menu "Change Server" while on secondary** — the tray menu now shows "Back to My Server" when viewing a secondary server, switching back without resetting.
+
+---
+
 ## v1.1.7
 
 ### Fixed

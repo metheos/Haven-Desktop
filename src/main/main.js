@@ -349,6 +349,7 @@ function createAppWindow(serverUrl) {
     // ── Keep all BrowserViews sized to the content area ──
     // setAutoResize can drift during fullscreen transitions; an explicit
     // handler guarantees every view fills the window exactly.
+    let _inFullscreenTransition = false;
     const resyncViews = () => {
       if (!mainWindow) return;
       const [w, h] = mainWindow.getContentSize();
@@ -356,8 +357,18 @@ function createAppWindow(serverUrl) {
         view.setBounds({ x: 0, y: 0, width: w, height: h });
       }
     };
+    // Also tell renderers to recalc CSS viewport (fixes 100vh drift after un-maximize)
+    const resyncViewsAndRenderer = () => {
+      resyncViews();
+      for (const v of serverViews.values()) {
+        try { v.webContents.executeJavaScript('window.dispatchEvent(new Event("resize"))').catch(()=>{}); } catch {}
+      }
+    };
     mainWindow.on('resize', resyncViews);
-    mainWindow.on('enter-full-screen',  resyncViews);
+    mainWindow.on('enter-full-screen', () => {
+      _inFullscreenTransition = true;
+      resyncViews();
+    });
     mainWindow.on('leave-full-screen',  () => {
       resyncViews();
       // Tell all renderers to clean up overlay state in case fullscreen
@@ -365,14 +376,21 @@ function createAppWindow(serverUrl) {
       for (const v of serverViews.values()) {
         try { v.webContents.send('fullscreen:window-left'); } catch {}
       }
+      // Keep the guard up briefly — Windows fires 'unmaximize' right after
+      // 'leave-full-screen' and the deferred resync would stomp the view.
+      setTimeout(() => { _inFullscreenTransition = false; }, 600);
     });
     mainWindow.on('maximize',  resyncViews);
     mainWindow.on('unmaximize', () => {
       resyncViews();
-      // Defer a second pass — getContentSize() can return stale values
+      // Skip deferred passes during a fullscreen exit — the leave-full-screen
+      // handler already sized everything correctly and the deferred calls
+      // would fire with stale (fullscreen) dimensions, breaking the view.
+      if (_inFullscreenTransition) return;
+      // Defer extra passes — getContentSize() can return stale values
       // while the OS is still animating the window back to its restored size.
-      setTimeout(resyncViews, 150);
-      setTimeout(resyncViews, 400);
+      setTimeout(resyncViewsAndRenderer, 150);
+      setTimeout(resyncViewsAndRenderer, 400);
     });
 
     // ── Minimize-to-tray: intercept close if enabled ──
@@ -465,18 +483,31 @@ function switchToServer(serverUrl) {
       // Check that the page is actually a Haven server by looking for a
       // Haven-specific element. Catches the case where the server URL now
       // points to a reverse proxy error page or a completely different site.
+      // Check both the app page (#app-body) and the login page (.auth-page).
       const isHaven = await view.webContents.executeJavaScript(
-        '!!document.getElementById("app-body")'
+        '!!(document.getElementById("app-body") || document.querySelector(".auth-page") || document.title.startsWith("Haven"))'
       ).catch(() => false);
       if (!isHaven && mainWindow && !mainWindow.isDestroyed()) {
+        const isSecondary = primaryServerUrl && url !== primaryServerUrl;
         const { response } = await dialog.showMessageBox(mainWindow, {
           type: 'warning',
-          buttons: ['Change Server', 'Keep Loading'],
+          buttons: [isSecondary ? 'Go Back to My Server' : 'Change Server', 'Keep Loading'],
           defaultId: 0,
           title: 'Haven Not Found',
           message: `The page at ${url} doesn't look like a Haven server.\n\nThis can happen if the server moved to a new address or the URL is wrong.`,
         });
-        if (response === 0) resetToWelcome(true);
+        if (response === 0) {
+          if (isSecondary) {
+            // Clean up the failed secondary view and return to primary
+            mainWindow?.removeBrowserView(view);
+            try { view.webContents.destroy(); } catch {}
+            serverViews.delete(url);
+            serverBadgeState.delete(url);
+            switchToServer(primaryServerUrl);
+          } else {
+            resetToWelcome(true);
+          }
+        }
       }
     });
     setTimeout(() => {
@@ -484,14 +515,25 @@ function switchToServer(serverUrl) {
       // Check if the page actually has content (async — never blocks renderer or main)
       view.webContents.executeJavaScript('document.body?.innerText?.length || 0').then(async (len) => {
         if (len > 20) return; // Page has content, it's fine
+        const isSecondary = primaryServerUrl && url !== primaryServerUrl;
         const { response } = await dialog.showMessageBox(mainWindow, {
           type: 'warning',
-          buttons: ['Go Back to Welcome', 'Keep Waiting'],
+          buttons: [isSecondary ? 'Go Back to My Server' : 'Go Back to Welcome', 'Keep Waiting'],
           defaultId: 0,
           title: 'Connection Problem',
           message: `Haven couldn't load the server at ${url}.\n\nThis could mean the server is down, the address is wrong, or there's a network issue.`,
         });
-        if (response === 0) resetToWelcome();
+        if (response === 0) {
+          if (isSecondary) {
+            mainWindow?.removeBrowserView(view);
+            try { view.webContents.destroy(); } catch {}
+            serverViews.delete(url);
+            serverBadgeState.delete(url);
+            switchToServer(primaryServerUrl);
+          } else {
+            resetToWelcome();
+          }
+        }
       }).catch(() => {});
     }, 15000);
 
@@ -909,7 +951,25 @@ function createTray() {
       { label: `Haven Desktop v${app.getVersion()}`, enabled: false },
       { type: 'separator' },
       { label: 'Show Haven', click: () => { (mainWindow || welcomeWindow)?.show(); (mainWindow || welcomeWindow)?.focus(); } },
-      ...(mainWindow ? [{ label: 'Change Server', click: () => resetToWelcome(true) }] : []),
+      ...(mainWindow ? [{
+        label: (activeServerUrl && primaryServerUrl && activeServerUrl !== primaryServerUrl) ? 'Back to My Server' : 'Change Server',
+        click: () => {
+          if (activeServerUrl && primaryServerUrl && activeServerUrl !== primaryServerUrl) {
+            // Viewing a secondary server — just switch back to primary
+            const secondaryUrl = activeServerUrl;
+            const secondaryView = serverViews.get(secondaryUrl);
+            if (secondaryView) {
+              mainWindow?.removeBrowserView(secondaryView);
+              try { secondaryView.webContents.destroy(); } catch {}
+              serverViews.delete(secondaryUrl);
+              serverBadgeState.delete(secondaryUrl);
+            }
+            switchToServer(primaryServerUrl);
+          } else {
+            resetToWelcome(true);
+          }
+        }
+      }] : []),
       { type: 'separator' },
       { label: running ? '● Server Running' : '○ Server Stopped', enabled: false },
       { type: 'separator' },
