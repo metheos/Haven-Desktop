@@ -429,12 +429,15 @@ function switchToServer(serverUrl) {
 
     view.webContents.loadURL(url + '/app.html');
 
-    // ── Fullscreen safety net — catch any native requests that bypass the preload override ──
+    // ── Fullscreen safety net — catch native requests that bypassed the preload's
+    //    JS override (Chromium's C++ internals skip Element.prototype).
+    //    Instead of making the window fullscreen directly (which leaves the video
+    //    in its normal DOM position), tell the preload to create our overlay. ──
     view.webContents.on('enter-html-full-screen', () => {
-      if (mainWindow && !mainWindow.isFullScreen()) mainWindow.setFullScreen(true);
+      view.webContents.send('fullscreen:native-intercepted');
     });
     view.webContents.on('leave-html-full-screen', () => {
-      if (mainWindow && mainWindow.isFullScreen()) mainWindow.setFullScreen(false);
+      // nothing — the preload handles exit via IPC
     });
 
     // ── Forward renderer performance logs to main process console ──

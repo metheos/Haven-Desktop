@@ -78,13 +78,23 @@ window.addEventListener('DOMContentLoaded', () => {
   let _origParent   = null;   // where to put it back
   let _origNext     = null;   // sibling bookmark for reinsertion
   let _overlay      = null;   // the body-level overlay div
+  let _lastVideoWrap = null;  // last .file-video-wrap the user interacted with
 
   // Inject the CSS that makes our manual fullscreen work.
   // We use a body-level overlay so ancestor transforms / filters / backdrop-filters
   // cannot break the fixed positioning (a known CSS spec containment issue).
+  //
+  // We also HIDE the native video controls' fullscreen button because
+  // BrowserView can't support it — Chromium's native controls call C++
+  // fullscreen internals that bypass our JS prototype overrides entirely.
+  // A custom button is injected by the MutationObserver below.
   function injectStyle() {
     const style = document.createElement('style');
     style.textContent = `
+      /* ── Kill the native fullscreen button (unreliable in BrowserView) ─ */
+      video::-webkit-media-controls-fullscreen-button { display: none !important; }
+
+      /* ── Fullscreen overlay (appended to <body>) ───────────────────── */
       #haven-fs-overlay {
         position: fixed !important;
         top: 0 !important;
@@ -99,7 +109,8 @@ window.addEventListener('DOMContentLoaded', () => {
         margin: 0 !important;
         padding: 0 !important;
       }
-      #haven-fs-overlay > video {
+      #haven-fs-overlay > video,
+      #haven-fs-overlay > .file-video-wrap video {
         width: 100% !important;
         height: 100% !important;
         max-width: 100% !important;
@@ -111,19 +122,39 @@ window.addEventListener('DOMContentLoaded', () => {
       #haven-fs-overlay > .file-video-wrap {
         width: 100% !important;
         height: 100% !important;
+        max-width: unset !important;
+        max-height: unset !important;
         display: flex !important;
         align-items: center !important;
         justify-content: center !important;
       }
-      #haven-fs-overlay > .file-video-wrap video {
-        width: 100% !important;
-        height: 100% !important;
-        max-width: 100% !important;
-        max-height: 100% !important;
-        object-fit: contain !important;
-        border-radius: 0 !important;
-        margin: 0 !important;
+      /* Hide our custom button inside the overlay (not needed in fs) */
+      #haven-fs-overlay .haven-fs-btn { display: none !important; }
+
+      /* ── Custom fullscreen button on video wraps ───────────────────── */
+      .haven-fs-btn {
+        position: absolute;
+        bottom: 10px;
+        right: 10px;
+        width: 30px;
+        height: 30px;
+        background: rgba(0,0,0,0.65);
+        color: #fff;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 14px;
+        opacity: 0;
+        transition: opacity 0.2s;
+        z-index: 10;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        line-height: 1;
       }
+      .file-video-wrap:hover .haven-fs-btn { opacity: 0.85; }
+      .haven-fs-btn:hover { opacity: 1 !important; background: rgba(0,0,0,0.85); }
     `;
     document.head.appendChild(style);
   }
@@ -253,6 +284,53 @@ window.addEventListener('DOMContentLoaded', () => {
       document.dispatchEvent(new Event('fullscreenchange'));
     }
   });
+
+  // ── Fallback: native fullscreen was somehow triggered (bypassed our JS
+  //    overrides via Chromium internals).  The main process tells us, and
+  //    we redirect into our overlay system. ──
+  ipcRenderer.on('fullscreen:native-intercepted', () => {
+    if (_fullscreenEl) return; // we're already handling it
+    const wrap = _lastVideoWrap || document.querySelector('.file-video-wrap');
+    if (wrap) enterFullscreen(wrap);
+  });
+
+  // ── Custom fullscreen button injection ──
+  // The native video controls' fullscreen button calls Chromium's internal
+  // C++ `Fullscreen::RequestFullscreen`, which completely bypasses our JS
+  // prototype override.  Since BrowserView can't support the native path,
+  // we hide that button via CSS and inject our own that calls through JS.
+  function addFSButton(wrap) {
+    if (wrap.querySelector('.haven-fs-btn')) return;
+    const btn = document.createElement('button');
+    btn.className = 'haven-fs-btn';
+    btn.title = 'Fullscreen';
+    btn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>`;
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      enterFullscreen(wrap);
+    });
+    wrap.appendChild(btn);
+    // Track interaction for the native-fullscreen fallback
+    wrap.addEventListener('pointerdown', () => { _lastVideoWrap = wrap; }, true);
+  }
+
+  function initVideoObserver() {
+    document.querySelectorAll('.file-video-wrap').forEach(addFSButton);
+    const obs = new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        for (const node of m.addedNodes) {
+          if (node.nodeType !== 1) continue;
+          if (node.classList?.contains('file-video-wrap')) addFSButton(node);
+          node.querySelectorAll?.('.file-video-wrap').forEach(addFSButton);
+        }
+      }
+    });
+    obs.observe(document.body, { childList: true, subtree: true });
+  }
+
+  if (document.body) initVideoObserver();
+  else window.addEventListener('DOMContentLoaded', initVideoObserver, { once: true });
 })();
 
 // ─── Internal state ──────────────────────────────────────
