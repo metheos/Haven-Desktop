@@ -346,53 +346,6 @@ function createAppWindow(serverUrl) {
     mainWindow.on('resize', saveBounds);
     mainWindow.on('move',   saveBounds);
 
-    // ── Keep all BrowserViews sized to the content area ──
-    // setAutoResize can drift during fullscreen transitions; an explicit
-    // handler guarantees every view fills the window exactly.
-    let _inFullscreenTransition = false;
-    const resyncViews = () => {
-      if (!mainWindow) return;
-      const [w, h] = mainWindow.getContentSize();
-      for (const view of serverViews.values()) {
-        view.setBounds({ x: 0, y: 0, width: w, height: h });
-      }
-    };
-    // Also tell renderers to recalc CSS viewport (fixes 100vh drift after un-maximize)
-    const resyncViewsAndRenderer = () => {
-      resyncViews();
-      for (const v of serverViews.values()) {
-        try { v.webContents.executeJavaScript('window.dispatchEvent(new Event("resize"))').catch(()=>{}); } catch {}
-      }
-    };
-    mainWindow.on('resize', resyncViews);
-    mainWindow.on('enter-full-screen', () => {
-      _inFullscreenTransition = true;
-      resyncViews();
-    });
-    mainWindow.on('leave-full-screen',  () => {
-      resyncViews();
-      // Tell all renderers to clean up overlay state in case fullscreen
-      // was exited via OS shortcut rather than our preload's Escape handler
-      for (const v of serverViews.values()) {
-        try { v.webContents.send('fullscreen:window-left'); } catch {}
-      }
-      // Keep the guard up briefly — Windows fires 'unmaximize' right after
-      // 'leave-full-screen' and the deferred resync would stomp the view.
-      setTimeout(() => { _inFullscreenTransition = false; }, 600);
-    });
-    mainWindow.on('maximize',  resyncViews);
-    mainWindow.on('unmaximize', () => {
-      resyncViews();
-      // Skip deferred passes during a fullscreen exit — the leave-full-screen
-      // handler already sized everything correctly and the deferred calls
-      // would fire with stale (fullscreen) dimensions, breaking the view.
-      if (_inFullscreenTransition) return;
-      // Defer extra passes — getContentSize() can return stale values
-      // while the OS is still animating the window back to its restored size.
-      setTimeout(resyncViewsAndRenderer, 150);
-      setTimeout(resyncViewsAndRenderer, 400);
-    });
-
     // ── Minimize-to-tray: intercept close if enabled ──
     mainWindow.on('close', (e) => {
       if (!app.isQuitting && store.get('minimizeToTray')) {
@@ -452,17 +405,6 @@ function switchToServer(serverUrl) {
     view.setAutoResize({ width: true, height: true });
 
     view.webContents.loadURL(url + '/app.html');
-
-    // ── Fullscreen safety net — catch native requests that bypassed the preload's
-    //    JS override (Chromium's C++ internals skip Element.prototype).
-    //    Instead of making the window fullscreen directly (which leaves the video
-    //    in its normal DOM position), tell the preload to create our overlay. ──
-    view.webContents.on('enter-html-full-screen', () => {
-      view.webContents.send('fullscreen:native-intercepted');
-    });
-    view.webContents.on('leave-html-full-screen', () => {
-      // nothing — the preload handles exit via IPC
-    });
 
     // ── Forward renderer performance logs to main process console ──
     // The renderer's automatic perf diagnostics use console.warn/log with

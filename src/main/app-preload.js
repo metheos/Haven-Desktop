@@ -74,87 +74,29 @@ window.addEventListener('DOMContentLoaded', () => {
 // ═══════════════════════════════════════════════════════════
 
 (function patchFullscreen() {
-  let _fullscreenEl = null;   // the element the caller requested fullscreen on
-  let _origParent   = null;   // where to put it back
-  let _origNext     = null;   // sibling bookmark for reinsertion
-  let _overlay      = null;   // the body-level overlay div
-  let _lastVideoWrap = null;  // last .file-video-wrap the user interacted with
+  let _fullscreenEl = null;
 
   // Inject the CSS that makes our manual fullscreen work.
-  // We use a body-level overlay so ancestor transforms / filters / backdrop-filters
-  // cannot break the fixed positioning (a known CSS spec containment issue).
-  //
-  // We also HIDE the native video controls' fullscreen button because
-  // BrowserView can't support it — Chromium's native controls call C++
-  // fullscreen internals that bypass our JS prototype overrides entirely.
-  // A custom button is injected by the MutationObserver below.
+  // Deferred to DOMContentLoaded because the preload runs before <head> exists.
   function injectStyle() {
     const style = document.createElement('style');
     style.textContent = `
-      /* ── Kill the native fullscreen button (unreliable in BrowserView) ─ */
-      video::-webkit-media-controls-fullscreen-button { display: none !important; }
-
-      /* ── Fullscreen overlay (appended to <body>) ───────────────────── */
-      #haven-fs-overlay {
+      .haven-manual-fullscreen {
         position: fixed !important;
         top: 0 !important;
         left: 0 !important;
         width: 100vw !important;
         height: 100vh !important;
-        z-index: 2147483647 !important;
-        background: #000 !important;
-        display: flex !important;
-        align-items: center !important;
-        justify-content: center !important;
-        margin: 0 !important;
-        padding: 0 !important;
-      }
-      #haven-fs-overlay > video,
-      #haven-fs-overlay > .file-video-wrap video {
-        width: 100% !important;
-        height: 100% !important;
-        max-width: 100% !important;
-        max-height: 100% !important;
-        object-fit: contain !important;
-        border-radius: 0 !important;
-        margin: 0 !important;
-      }
-      #haven-fs-overlay > .file-video-wrap {
-        width: 100% !important;
-        height: 100% !important;
         max-width: unset !important;
         max-height: unset !important;
-        display: flex !important;
-        align-items: center !important;
-        justify-content: center !important;
+        z-index: 2147483647 !important;
+        background: #000 !important;
+        object-fit: contain !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        border: none !important;
+        border-radius: 0 !important;
       }
-      /* Hide our custom button inside the overlay (not needed in fs) */
-      #haven-fs-overlay .haven-fs-btn { display: none !important; }
-
-      /* ── Custom fullscreen button on video wraps ───────────────────── */
-      .haven-fs-btn {
-        position: absolute;
-        bottom: 10px;
-        right: 10px;
-        width: 30px;
-        height: 30px;
-        background: rgba(0,0,0,0.65);
-        color: #fff;
-        border: none;
-        border-radius: 4px;
-        cursor: pointer;
-        font-size: 14px;
-        opacity: 0;
-        transition: opacity 0.2s;
-        z-index: 10;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        padding: 0;
-        line-height: 1;
-      }
-      .file-video-wrap:hover .haven-fs-btn { opacity: 0.85; }
-      .haven-fs-btn:hover { opacity: 1 !important; background: rgba(0,0,0,0.85); }
     `;
     document.head.appendChild(style);
   }
@@ -163,52 +105,22 @@ window.addEventListener('DOMContentLoaded', () => {
 
   function enterFullscreen(el) {
     if (_fullscreenEl) exitFullscreen();
-
-    // For file videos, fullscreen the wrapper so native controls stay visible
-    if (el.tagName === 'VIDEO' && el.closest('.file-video-wrap')) {
-      el = el.closest('.file-video-wrap');
-    }
-
-    // Remember original DOM position for restoration
-    _origParent = el.parentNode;
-    _origNext   = el.nextSibling;
     _fullscreenEl = el;
-
-    // Create a body-level overlay and move the element into it.
-    // This is immune to ancestor transform/filter containment quirks.
-    _overlay = document.createElement('div');
-    _overlay.id = 'haven-fs-overlay';
-    document.body.appendChild(_overlay);
-    _overlay.appendChild(el);
-
+    el.classList.add('haven-manual-fullscreen');
     ipcRenderer.send('window:enter-fullscreen');
     document.dispatchEvent(new Event('fullscreenchange'));
   }
 
   function exitFullscreen() {
-    // Restore the element to its original position in the DOM
-    if (_fullscreenEl && _origParent) {
-      try {
-        if (_origNext && _origNext.parentNode === _origParent) {
-          _origParent.insertBefore(_fullscreenEl, _origNext);
-        } else {
-          _origParent.appendChild(_fullscreenEl);
-        }
-      } catch { /* original parent removed — element stays detached */ }
+    if (_fullscreenEl) {
+      _fullscreenEl.classList.remove('haven-manual-fullscreen');
+      _fullscreenEl = null;
     }
-    _fullscreenEl = null;
-    _origParent   = null;
-    _origNext     = null;
-
-    if (_overlay) { _overlay.remove(); _overlay = null; }
-
     ipcRenderer.send('window:leave-fullscreen');
     document.dispatchEvent(new Event('fullscreenchange'));
-    // Force a layout recalc after the window leaves fullscreen
-    setTimeout(() => window.dispatchEvent(new Event('resize')), 300);
   }
 
-  // ── Override every entry-point Chromium exposes ──
+  // Override requestFullscreen
   Element.prototype.requestFullscreen = function () {
     enterFullscreen(this);
     return Promise.resolve();
@@ -219,28 +131,13 @@ window.addEventListener('DOMContentLoaded', () => {
     };
   }
 
-  // Native <video> controls may route through these instead of requestFullscreen
-  if (typeof HTMLVideoElement !== 'undefined') {
-    HTMLVideoElement.prototype.webkitEnterFullscreen = function () {
-      enterFullscreen(this);
-    };
-    HTMLVideoElement.prototype.webkitEnterFullScreen = function () {
-      enterFullscreen(this);
-    };
-  }
-
-  // ── Exit overrides ──
+  // Override exitFullscreen
   Document.prototype.exitFullscreen = function () {
     exitFullscreen();
     return Promise.resolve();
   };
-  if (Document.prototype.webkitExitFullscreen) {
-    Document.prototype.webkitExitFullscreen = function () {
-      exitFullscreen();
-    };
-  }
 
-  // ── Getters ──
+  // Override document.fullscreenElement getter
   Object.defineProperty(Document.prototype, 'fullscreenElement', {
     get() { return _fullscreenEl; },
     configurable: true,
@@ -254,83 +151,13 @@ window.addEventListener('DOMContentLoaded', () => {
     configurable: true,
   });
 
-  // ── Escape key exits fullscreen ──
+  // Escape key exits fullscreen
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && _fullscreenEl) {
       e.preventDefault();
-      e.stopImmediatePropagation();
       exitFullscreen();
     }
   }, true);
-
-  // ── Safety net: if the Electron window leaves fullscreen by any means
-  //    (OS shortcut, etc.) clean up the overlay ──
-  ipcRenderer.on('fullscreen:window-left', () => {
-    if (_fullscreenEl) {
-      // Restore element without sending IPC back (window already left)
-      if (_origParent) {
-        try {
-          if (_origNext && _origNext.parentNode === _origParent) {
-            _origParent.insertBefore(_fullscreenEl, _origNext);
-          } else {
-            _origParent.appendChild(_fullscreenEl);
-          }
-        } catch {}
-      }
-      _fullscreenEl = null;
-      _origParent = null;
-      _origNext = null;
-      if (_overlay) { _overlay.remove(); _overlay = null; }
-      document.dispatchEvent(new Event('fullscreenchange'));
-    }
-  });
-
-  // ── Fallback: native fullscreen was somehow triggered (bypassed our JS
-  //    overrides via Chromium internals).  The main process tells us, and
-  //    we redirect into our overlay system. ──
-  ipcRenderer.on('fullscreen:native-intercepted', () => {
-    if (_fullscreenEl) return; // we're already handling it
-    const wrap = _lastVideoWrap || document.querySelector('.file-video-wrap');
-    if (wrap) enterFullscreen(wrap);
-  });
-
-  // ── Custom fullscreen button injection ──
-  // The native video controls' fullscreen button calls Chromium's internal
-  // C++ `Fullscreen::RequestFullscreen`, which completely bypasses our JS
-  // prototype override.  Since BrowserView can't support the native path,
-  // we hide that button via CSS and inject our own that calls through JS.
-  function addFSButton(wrap) {
-    if (wrap.querySelector('.haven-fs-btn')) return;
-    const btn = document.createElement('button');
-    btn.className = 'haven-fs-btn';
-    btn.title = 'Fullscreen';
-    btn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>`;
-    btn.addEventListener('click', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      enterFullscreen(wrap);
-    });
-    wrap.appendChild(btn);
-    // Track interaction for the native-fullscreen fallback
-    wrap.addEventListener('pointerdown', () => { _lastVideoWrap = wrap; }, true);
-  }
-
-  function initVideoObserver() {
-    document.querySelectorAll('.file-video-wrap').forEach(addFSButton);
-    const obs = new MutationObserver((mutations) => {
-      for (const m of mutations) {
-        for (const node of m.addedNodes) {
-          if (node.nodeType !== 1) continue;
-          if (node.classList?.contains('file-video-wrap')) addFSButton(node);
-          node.querySelectorAll?.('.file-video-wrap').forEach(addFSButton);
-        }
-      }
-    });
-    obs.observe(document.body, { childList: true, subtree: true });
-  }
-
-  if (document.body) initVideoObserver();
-  else window.addEventListener('DOMContentLoaded', initVideoObserver, { once: true });
 })();
 
 // ─── Internal state ──────────────────────────────────────

@@ -1,5 +1,12 @@
 # Haven Desktop Changelog
 
+## v1.1.9
+
+### Fixed
+- **Fullscreen reverted to v1.1.6 approach** — the overlay-based fullscreen rewrite from v1.1.7 broke MP4 embed fullscreen. Reverted to the original CSS class toggle (`haven-manual-fullscreen`) that was working in v1.1.6. Removed all the extra BrowserView resync handlers, `enter-html-full-screen` interceptors, custom fullscreen button injection, and DOM-manipulation overlay code that was causing the regression.
+
+---
+
 ## v1.1.8
 
 ### Fixed
