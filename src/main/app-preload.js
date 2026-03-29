@@ -97,6 +97,19 @@ window.addEventListener('DOMContentLoaded', () => {
         border: none !important;
         border-radius: 0 !important;
       }
+      /* When the wrapper is fullscreened, center the video inside it */
+      .haven-manual-fullscreen.file-video-wrap {
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+      }
+      .haven-manual-fullscreen.file-video-wrap video {
+        width: 100% !important;
+        height: 100% !important;
+        max-width: 100% !important;
+        max-height: 100% !important;
+        object-fit: contain !important;
+      }
     `;
     document.head.appendChild(style);
   }
@@ -105,6 +118,10 @@ window.addEventListener('DOMContentLoaded', () => {
 
   function enterFullscreen(el) {
     if (_fullscreenEl) exitFullscreen();
+    // For file videos, fullscreen the wrapper for proper controls positioning
+    if (el.tagName === 'VIDEO' && el.closest('.file-video-wrap')) {
+      el = el.closest('.file-video-wrap');
+    }
     _fullscreenEl = el;
     el.classList.add('haven-manual-fullscreen');
     ipcRenderer.send('window:enter-fullscreen');
@@ -118,6 +135,8 @@ window.addEventListener('DOMContentLoaded', () => {
     }
     ipcRenderer.send('window:leave-fullscreen');
     document.dispatchEvent(new Event('fullscreenchange'));
+    // Force a layout recalc after the window leaves fullscreen to prevent broken state
+    setTimeout(() => window.dispatchEvent(new Event('resize')), 300);
   }
 
   // Override requestFullscreen
