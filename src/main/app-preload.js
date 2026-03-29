@@ -74,41 +74,55 @@ window.addEventListener('DOMContentLoaded', () => {
 // ═══════════════════════════════════════════════════════════
 
 (function patchFullscreen() {
-  let _fullscreenEl = null;
+  let _fullscreenEl = null;   // the element the caller requested fullscreen on
+  let _origParent   = null;   // where to put it back
+  let _origNext     = null;   // sibling bookmark for reinsertion
+  let _overlay      = null;   // the body-level overlay div
 
   // Inject the CSS that makes our manual fullscreen work.
-  // Deferred to DOMContentLoaded because the preload runs before &lt;head&gt; exists.
+  // We use a body-level overlay so ancestor transforms / filters / backdrop-filters
+  // cannot break the fixed positioning (a known CSS spec containment issue).
   function injectStyle() {
     const style = document.createElement('style');
     style.textContent = `
-      .haven-manual-fullscreen {
+      #haven-fs-overlay {
         position: fixed !important;
         top: 0 !important;
         left: 0 !important;
         width: 100vw !important;
         height: 100vh !important;
-        max-width: unset !important;
-        max-height: unset !important;
         z-index: 2147483647 !important;
         background: #000 !important;
-        object-fit: contain !important;
-        margin: 0 !important;
-        padding: 0 !important;
-        border: none !important;
-        border-radius: 0 !important;
-      }
-      /* When the wrapper is fullscreened, center the video inside it */
-      .haven-manual-fullscreen.file-video-wrap {
         display: flex !important;
         align-items: center !important;
         justify-content: center !important;
+        margin: 0 !important;
+        padding: 0 !important;
       }
-      .haven-manual-fullscreen.file-video-wrap video {
+      #haven-fs-overlay > video {
         width: 100% !important;
         height: 100% !important;
         max-width: 100% !important;
         max-height: 100% !important;
         object-fit: contain !important;
+        border-radius: 0 !important;
+        margin: 0 !important;
+      }
+      #haven-fs-overlay > .file-video-wrap {
+        width: 100% !important;
+        height: 100% !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+      }
+      #haven-fs-overlay > .file-video-wrap video {
+        width: 100% !important;
+        height: 100% !important;
+        max-width: 100% !important;
+        max-height: 100% !important;
+        object-fit: contain !important;
+        border-radius: 0 !important;
+        margin: 0 !important;
       }
     `;
     document.head.appendChild(style);
@@ -118,28 +132,52 @@ window.addEventListener('DOMContentLoaded', () => {
 
   function enterFullscreen(el) {
     if (_fullscreenEl) exitFullscreen();
-    // For file videos, fullscreen the wrapper for proper controls positioning
+
+    // For file videos, fullscreen the wrapper so native controls stay visible
     if (el.tagName === 'VIDEO' && el.closest('.file-video-wrap')) {
       el = el.closest('.file-video-wrap');
     }
+
+    // Remember original DOM position for restoration
+    _origParent = el.parentNode;
+    _origNext   = el.nextSibling;
     _fullscreenEl = el;
-    el.classList.add('haven-manual-fullscreen');
+
+    // Create a body-level overlay and move the element into it.
+    // This is immune to ancestor transform/filter containment quirks.
+    _overlay = document.createElement('div');
+    _overlay.id = 'haven-fs-overlay';
+    document.body.appendChild(_overlay);
+    _overlay.appendChild(el);
+
     ipcRenderer.send('window:enter-fullscreen');
     document.dispatchEvent(new Event('fullscreenchange'));
   }
 
   function exitFullscreen() {
-    if (_fullscreenEl) {
-      _fullscreenEl.classList.remove('haven-manual-fullscreen');
-      _fullscreenEl = null;
+    // Restore the element to its original position in the DOM
+    if (_fullscreenEl && _origParent) {
+      try {
+        if (_origNext && _origNext.parentNode === _origParent) {
+          _origParent.insertBefore(_fullscreenEl, _origNext);
+        } else {
+          _origParent.appendChild(_fullscreenEl);
+        }
+      } catch { /* original parent removed — element stays detached */ }
     }
+    _fullscreenEl = null;
+    _origParent   = null;
+    _origNext     = null;
+
+    if (_overlay) { _overlay.remove(); _overlay = null; }
+
     ipcRenderer.send('window:leave-fullscreen');
     document.dispatchEvent(new Event('fullscreenchange'));
-    // Force a layout recalc after the window leaves fullscreen to prevent broken state
+    // Force a layout recalc after the window leaves fullscreen
     setTimeout(() => window.dispatchEvent(new Event('resize')), 300);
   }
 
-  // Override requestFullscreen
+  // ── Override every entry-point Chromium exposes ──
   Element.prototype.requestFullscreen = function () {
     enterFullscreen(this);
     return Promise.resolve();
@@ -150,13 +188,28 @@ window.addEventListener('DOMContentLoaded', () => {
     };
   }
 
-  // Override exitFullscreen
+  // Native <video> controls may route through these instead of requestFullscreen
+  if (typeof HTMLVideoElement !== 'undefined') {
+    HTMLVideoElement.prototype.webkitEnterFullscreen = function () {
+      enterFullscreen(this);
+    };
+    HTMLVideoElement.prototype.webkitEnterFullScreen = function () {
+      enterFullscreen(this);
+    };
+  }
+
+  // ── Exit overrides ──
   Document.prototype.exitFullscreen = function () {
     exitFullscreen();
     return Promise.resolve();
   };
+  if (Document.prototype.webkitExitFullscreen) {
+    Document.prototype.webkitExitFullscreen = function () {
+      exitFullscreen();
+    };
+  }
 
-  // Override document.fullscreenElement getter
+  // ── Getters ──
   Object.defineProperty(Document.prototype, 'fullscreenElement', {
     get() { return _fullscreenEl; },
     configurable: true,
@@ -170,13 +223,36 @@ window.addEventListener('DOMContentLoaded', () => {
     configurable: true,
   });
 
-  // Escape key exits fullscreen
+  // ── Escape key exits fullscreen ──
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && _fullscreenEl) {
       e.preventDefault();
+      e.stopImmediatePropagation();
       exitFullscreen();
     }
   }, true);
+
+  // ── Safety net: if the Electron window leaves fullscreen by any means
+  //    (OS shortcut, etc.) clean up the overlay ──
+  ipcRenderer.on('fullscreen:window-left', () => {
+    if (_fullscreenEl) {
+      // Restore element without sending IPC back (window already left)
+      if (_origParent) {
+        try {
+          if (_origNext && _origNext.parentNode === _origParent) {
+            _origParent.insertBefore(_fullscreenEl, _origNext);
+          } else {
+            _origParent.appendChild(_fullscreenEl);
+          }
+        } catch {}
+      }
+      _fullscreenEl = null;
+      _origParent = null;
+      _origNext = null;
+      if (_overlay) { _overlay.remove(); _overlay = null; }
+      document.dispatchEvent(new Event('fullscreenchange'));
+    }
+  });
 })();
 
 // ─── Internal state ──────────────────────────────────────

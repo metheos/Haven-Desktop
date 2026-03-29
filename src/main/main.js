@@ -358,7 +358,14 @@ function createAppWindow(serverUrl) {
     };
     mainWindow.on('resize', resyncViews);
     mainWindow.on('enter-full-screen',  resyncViews);
-    mainWindow.on('leave-full-screen',  resyncViews);
+    mainWindow.on('leave-full-screen',  () => {
+      resyncViews();
+      // Tell all renderers to clean up overlay state in case fullscreen
+      // was exited via OS shortcut rather than our preload's Escape handler
+      for (const v of serverViews.values()) {
+        try { v.webContents.send('fullscreen:window-left'); } catch {}
+      }
+    });
     mainWindow.on('maximize',  resyncViews);
     mainWindow.on('unmaximize', resyncViews);
 
@@ -421,6 +428,14 @@ function switchToServer(serverUrl) {
     view.setAutoResize({ width: true, height: true });
 
     view.webContents.loadURL(url + '/app.html');
+
+    // ── Fullscreen safety net — catch any native requests that bypass the preload override ──
+    view.webContents.on('enter-html-full-screen', () => {
+      if (mainWindow && !mainWindow.isFullScreen()) mainWindow.setFullScreen(true);
+    });
+    view.webContents.on('leave-html-full-screen', () => {
+      if (mainWindow && mainWindow.isFullScreen()) mainWindow.setFullScreen(false);
+    });
 
     // ── Forward renderer performance logs to main process console ──
     // The renderer's automatic perf diagnostics use console.warn/log with
