@@ -508,12 +508,21 @@ function switchToServer(serverUrl) {
     });
 
     // ── Open external links in default browser (issue #5) ──
+    // Allow navigations to known embed origins (SoundCloud, Spotify, YouTube)
+    // so iframes work correctly instead of hijacking the main view.
+    const EMBED_ORIGINS = [
+      'https://w.soundcloud.com',
+      'https://open.spotify.com',
+      'https://www.youtube.com',
+      'https://www.youtube-nocookie.com',
+    ];
     view.webContents.on('will-navigate', (event, navUrl) => {
       try {
-        if (new URL(navUrl).origin !== new URL(url).origin) {
-          event.preventDefault();
-          shell.openExternal(navUrl);
-        }
+        const navOrigin = new URL(navUrl).origin;
+        if (navOrigin === new URL(url).origin) return;
+        if (EMBED_ORIGINS.includes(navOrigin)) return;
+        event.preventDefault();
+        shell.openExternal(navUrl);
       } catch {}
     });
 
