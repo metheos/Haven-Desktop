@@ -16,11 +16,15 @@ const { ipcRenderer } = require('electron');
 // Mark the document as running inside the Electron shell.
 // This lets CSS override responsive breakpoints that would otherwise
 // hide desktop UI elements (e.g. the status bar) on narrow windows.
-// Must be deferred: the preload runs before the DOM is parsed, so
-// document.documentElement is null until DOMContentLoaded fires.
-window.addEventListener('DOMContentLoaded', () => {
+// Try to set it immediately (document.documentElement exists in modern
+// Electron even before parsing).  Fall back to DOMContentLoaded if not.
+if (document.documentElement) {
   document.documentElement.setAttribute('data-desktop-app', '1');
-}, { once: true });
+} else {
+  window.addEventListener('DOMContentLoaded', () => {
+    document.documentElement.setAttribute('data-desktop-app', '1');
+  }, { once: true });
+}
 // ═══════════════════════════════════════════════════════════
 // JavaScript Dialog Overrides for BrowserView (issue #6)
 //
@@ -60,6 +64,102 @@ window.alert = (message) => {
 // the next launch, which prevents rejoining until they manually "leave" first.
 window.addEventListener('DOMContentLoaded', () => {
   try { localStorage.removeItem('haven_voice_channel'); } catch {}
+});
+
+// ─── Desktop Status Bar — guaranteed visible ─────────────────────────────
+// The server's responsive CSS hides #status-bar at narrow viewport widths
+// (for mobile).  Windows DPI scaling can shrink the BrowserView's CSS
+// viewport below that threshold.  We solve this by injecting a fixed-position
+// bar at the bottom of the page from the preload — entirely independent of
+// the server's CSS layout.  We clone the server bar's live text nodes so
+// the data (ping, version, channel, online count) stays in sync.
+window.addEventListener('DOMContentLoaded', () => {
+  // Inject the CSS once
+  const css = document.createElement('style');
+  css.textContent = `
+    /* Hide the original status bar — we replace it with a fixed clone */
+    .status-bar#status-bar { display: none !important; }
+
+    #haven-desktop-footer {
+      position: fixed !important;
+      bottom: 0; left: 0; right: 0;
+      z-index: 9999;
+      display: flex !important;
+      align-items: center;
+      gap: 16px;
+      padding: 4px 16px;
+      background: var(--bg-secondary, #1e2035);
+      border-top: 1px solid var(--border, #333);
+      font-size: 11px;
+      color: var(--text-muted, #888);
+      font-family: var(--font-main, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif);
+      user-select: none;
+      min-height: 26px;
+    }
+    #haven-desktop-footer .hdf-item {
+      display: flex; align-items: center; gap: 5px; white-space: nowrap;
+    }
+    #haven-desktop-footer .hdf-label {
+      text-transform: uppercase; letter-spacing: 0.3px; font-weight: 600; font-size: 10px;
+    }
+    #haven-desktop-footer .hdf-value {
+      color: var(--text-secondary, #bbb); font-family: var(--font-mono, monospace); font-size: 11px;
+    }
+    #haven-desktop-footer .hdf-divider {
+      width: 1px; height: 14px; background: var(--border, #333);
+    }
+    #haven-desktop-footer .hdf-spacer { flex: 1; }
+    #haven-desktop-footer .hdf-version { opacity: 0.5; font-size: 10px; }
+    #haven-desktop-footer .hdf-led {
+      width: 8px; height: 8px; border-radius: 50%; background: #4ade80; flex-shrink: 0;
+    }
+
+    /* Push the rest of the page up so it's not hidden behind the fixed footer */
+    #app { padding-bottom: 26px !important; }
+  `;
+  document.head.appendChild(css);
+
+  // Build the footer bar
+  const bar = document.createElement('div');
+  bar.id = 'haven-desktop-footer';
+  bar.innerHTML = `
+    <div class="hdf-item"><span class="hdf-led" id="hdf-led"></span><span class="hdf-label">Server</span><span class="hdf-value" id="hdf-server">Connected</span></div>
+    <div class="hdf-divider"></div>
+    <div class="hdf-item"><span class="hdf-label">Ping</span><span class="hdf-value" id="hdf-ping">--</span><span class="hdf-label">ms</span></div>
+    <div class="hdf-divider"></div>
+    <div class="hdf-item"><span class="hdf-label">Channel</span><span class="hdf-value" id="hdf-channel">None</span></div>
+    <div class="hdf-divider"></div>
+    <div class="hdf-item"><span class="hdf-label">Online</span><span class="hdf-value" id="hdf-online">0</span></div>
+    <span class="hdf-spacer"></span>
+    <div class="hdf-item"><span class="hdf-value" id="hdf-clock"></span></div>
+    <div class="hdf-divider"></div>
+    <div class="hdf-item"><span class="hdf-value hdf-version" id="hdf-version"></span></div>
+  `;
+  document.body.appendChild(bar);
+
+  // Sync data from the original (hidden) status bar elements every 500ms
+  setInterval(() => {
+    const sync = (src, dst) => {
+      const s = document.getElementById(src);
+      const d = document.getElementById(dst);
+      if (s && d && d.textContent !== s.textContent) d.textContent = s.textContent;
+    };
+    sync('status-server-text', 'hdf-server');
+    sync('status-ping',        'hdf-ping');
+    sync('status-channel',     'hdf-channel');
+    sync('status-online-count','hdf-online');
+    sync('status-clock',       'hdf-clock');
+    sync('status-version',     'hdf-version');
+
+    // Sync the LED color
+    const srcLed = document.getElementById('status-server-led');
+    const dstLed = document.getElementById('hdf-led');
+    if (srcLed && dstLed) {
+      const cls = srcLed.className;
+      dstLed.style.background = cls.includes('danger') ? '#ef4444' : cls.includes('warn') ? '#f59e0b' : '#4ade80';
+      dstLed.style.animation = cls.includes('pulse') ? 'pulse 1.5s infinite' : 'none';
+    }
+  }, 500);
 });
 
 // ═══════════════════════════════════════════════════════════
