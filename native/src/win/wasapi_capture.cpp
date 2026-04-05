@@ -324,6 +324,11 @@ void WasapiCapture::captureLoop() {
     fmt.nBlockAlign     = fmt.nChannels * (fmt.wBitsPerSample / 8);
     fmt.nAvgBytesPerSec = fmt.nSamplesPerSec * fmt.nBlockAlign;
 
+    // Track the actual capture format so the read loop can adapt
+    int captureChannels    = 2;
+    bool captureIsFloat    = true;
+    int  captureBitsPerSample = 32;
+
     // Try shared-mode with our preferred format
     hr = client->Initialize(
         AUDCLNT_SHAREMODE_SHARED,
@@ -333,10 +338,17 @@ void WasapiCapture::captureLoop() {
     );
 
     if (FAILED(hr)) {
-        // Fallback: use the mix format
+        // Fallback: use the mix format (AUTOCONVERTPCM is a no-op here
+        // since we're requesting the device's native format, so we must
+        // adapt our read loop to match the actual format.)
         WAVEFORMATEX* mixFmt = nullptr;
         client->GetMixFormat(&mixFmt);
         if (mixFmt) {
+            captureChannels       = mixFmt->nChannels;
+            captureBitsPerSample  = mixFmt->wBitsPerSample;
+            captureIsFloat        = (mixFmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) ||
+                                    (mixFmt->wFormatTag == 0xFFFE /* WAVE_FORMAT_EXTENSIBLE */
+                                     && mixFmt->wBitsPerSample == 32);
             hr = client->Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
                 AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
@@ -397,11 +409,33 @@ void WasapiCapture::captureLoop() {
                 const float* fdata = reinterpret_cast<const float*>(data);
                 monoBuffer.clear();
 
-                // Mix stereo → mono
-                for (UINT32 f = 0; f < frames; f++) {
-                    float left  = fdata[f * 2];
-                    float right = fdata[f * 2 + 1];
-                    monoBuffer.push_back((left + right) * 0.5f);
+                // Mix N-channel → mono, adapting to the actual capture format
+                if (captureIsFloat && captureBitsPerSample == 32) {
+                    // Float32 — sum all channels and divide
+                    for (UINT32 f = 0; f < frames; f++) {
+                        float sum = 0.0f;
+                        for (int ch = 0; ch < captureChannels; ch++) {
+                            sum += fdata[f * captureChannels + ch];
+                        }
+                        monoBuffer.push_back(sum / (float)captureChannels);
+                    }
+                } else if (!captureIsFloat && captureBitsPerSample == 16) {
+                    // 16-bit signed PCM — convert to float and mix down
+                    const int16_t* idata = reinterpret_cast<const int16_t*>(data);
+                    for (UINT32 f = 0; f < frames; f++) {
+                        float sum = 0.0f;
+                        for (int ch = 0; ch < captureChannels; ch++) {
+                            sum += idata[f * captureChannels + ch] / 32768.0f;
+                        }
+                        monoBuffer.push_back(sum / (float)captureChannels);
+                    }
+                } else {
+                    // Unknown format — treat as stereo float32 (best effort)
+                    for (UINT32 f = 0; f < frames; f++) {
+                        float left  = fdata[f * 2];
+                        float right = fdata[f * 2 + 1];
+                        monoBuffer.push_back((left + right) * 0.5f);
+                    }
                 }
 
                 // Deliver to JS

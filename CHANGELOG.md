@@ -1,5 +1,15 @@
 # Haven Desktop Changelog
 
+## v1.2.0
+
+### Fixed
+- **Per-app audio pipeline overhaul** (#165) — several bugs in the per-app audio path that together caused silence for viewers:
+  - ScriptProcessor fallback now uses 0 input channels (was 1 with nothing connected), which is more reliable in Chromium.
+  - IPC PCM data handler now correctly handles typed arrays with non-zero byte offsets and unknown buffer types instead of potentially misreading data.
+  - WASAPI capture loop now adapts to the device's actual mix format (channel count and sample type) when the preferred 48kHz stereo float32 initialization fails. Previously it hardcoded stereo float32 interleaving regardless of what the OS reported, which could produce garbled audio on systems with surround-sound or 16-bit mix formats. (#209)
+
+---
+
 ## v1.1.9
 
 ### Fixed

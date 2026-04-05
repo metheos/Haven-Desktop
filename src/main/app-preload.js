@@ -283,11 +283,25 @@ ipcRenderer.on('server:log', (_event, msg) => {
 
 // ─── Receive PCM chunks from native addon (main process) ─
 ipcRenderer.on('audio:capture-data', (_event, pcmData) => {
-  const samples = new Float32Array(
-    pcmData.buffer  ? pcmData.buffer
-    : ArrayBuffer.isView(pcmData) ? pcmData.buffer
-    : pcmData
-  );
+  // Build a Float32Array from whatever format Electron's IPC delivers.
+  // Typed arrays come through V8 structured clone, but we handle edge
+  // cases (Buffer/Uint8Array, non-zero byteOffset) defensively.
+  let samples;
+  try {
+    if (pcmData instanceof Float32Array) {
+      samples = pcmData;
+    } else if (ArrayBuffer.isView(pcmData)) {
+      // Uint8Array / Buffer — reinterpret bytes as float32, respecting offset
+      samples = new Float32Array(pcmData.buffer, pcmData.byteOffset, pcmData.byteLength / 4);
+    } else if (pcmData instanceof ArrayBuffer) {
+      samples = new Float32Array(pcmData);
+    } else {
+      return; // Unknown format — drop silently
+    }
+  } catch (e) {
+    console.warn('[Haven Desktop] audio:capture-data conversion failed:', e.message);
+    return;
+  }
 
   if (_audioWorkletNode) {
     _audioWorkletNode.port.postMessage({ type: 'audio-data', samples });
@@ -587,7 +601,7 @@ async function buildAudioPipeline() {
     if (_audioCtx.state === 'suspended') await _audioCtx.resume();
 
     const bufSize = 4096;
-    const scriptNode = _audioCtx.createScriptProcessor(bufSize, 1, 2);
+    const scriptNode = _audioCtx.createScriptProcessor(bufSize, 0, 2);
     const ring   = new Float32Array(96000);
     let   wPos   = 0;
     let   rPos   = 0;
