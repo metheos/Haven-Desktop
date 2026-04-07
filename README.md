@@ -181,7 +181,7 @@ Haven Desktop is just the client. **You need a Haven server to connect to.**
 
 ## 📝 License
 
-Same license as Haven — MIT-NC. See [LICENSE](https://github.com/ancsemi/Haven/blob/main/LICENSE).
+Same license as Haven — AGPL-3.0. See [LICENSE](https://github.com/ancsemi/Haven/blob/main/LICENSE).
 
 ---
 

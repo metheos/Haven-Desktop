@@ -310,7 +310,7 @@ PCM data arrives via IPC → `AudioWorkletNode` processes it → `MediaStreamDes
 
 ## 📝 License
 
-Same license as Haven — MIT-NC. See [LICENSE](../Haven/LICENSE).
+Same license as Haven — AGPL-3.0. See [LICENSE](../Haven/LICENSE).
 
 ---
 

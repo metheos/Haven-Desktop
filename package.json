@@ -7,7 +7,7 @@
     "name": "Haven Contributors",
     "email": "help.havenapp@gmail.com"
   },
-  "license": "MIT-NC",
+  "license": "AGPL-3.0",
   "homepage": "https://ancsemi.github.io/Haven/",
   "scripts": {
     "start": "electron .",

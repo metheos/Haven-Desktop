@@ -282,31 +282,42 @@ ipcRenderer.on('server:log', (_event, msg) => {
 });
 
 // ─── Receive PCM chunks from native addon (main process) ─
+let _ipcDataCount = 0;
 ipcRenderer.on('audio:capture-data', (_event, pcmData) => {
-  // Build a Float32Array from whatever format Electron's IPC delivers.
-  // Typed arrays come through V8 structured clone, but we handle edge
-  // cases (Buffer/Uint8Array, non-zero byteOffset) defensively.
+  // Build a Float32Array from whatever Electron's IPC delivers.
+  // The main process now sends a plain ArrayBuffer (guaranteed offset-0),
+  // but we still handle typed-array arrivals defensively.
   let samples;
   try {
     if (pcmData instanceof Float32Array) {
       samples = pcmData;
-    } else if (ArrayBuffer.isView(pcmData)) {
-      // Uint8Array / Buffer — reinterpret bytes as float32, respecting offset
-      samples = new Float32Array(pcmData.buffer, pcmData.byteOffset, pcmData.byteLength / 4);
     } else if (pcmData instanceof ArrayBuffer) {
       samples = new Float32Array(pcmData);
+    } else if (ArrayBuffer.isView(pcmData)) {
+      // Buffer/Uint8Array — copy to a fresh aligned ArrayBuffer to avoid
+      // RangeError when byteOffset is not 4-byte-aligned.
+      const bytes = new Uint8Array(pcmData.buffer, pcmData.byteOffset, pcmData.byteLength);
+      const aligned = new ArrayBuffer(bytes.length);
+      new Uint8Array(aligned).set(bytes);
+      samples = new Float32Array(aligned);
     } else {
-      return; // Unknown format — drop silently
+      console.warn('[Haven Desktop] audio:capture-data unknown format:', typeof pcmData);
+      return;
     }
   } catch (e) {
     console.warn('[Haven Desktop] audio:capture-data conversion failed:', e.message);
     return;
   }
 
+  // Periodic diagnostic: confirm data is arriving
+  _ipcDataCount++;
+  if (_ipcDataCount === 1 || _ipcDataCount % 500 === 0) {
+    console.log(`[Haven Desktop] audio:capture-data chunk #${_ipcDataCount}, ${samples.length} samples, peak=${Math.max(...Array.from(samples.slice(0, 128)).map(Math.abs)).toFixed(4)}`);
+  }
+
   if (_audioWorkletNode) {
     _audioWorkletNode.port.postMessage({ type: 'audio-data', samples });
   } else if (window._havenAppAudioPush) {
-    // ScriptProcessorNode fallback path
     window._havenAppAudioPush(samples);
   } else {
     _audioBufferQueue.push(samples);
@@ -562,6 +573,7 @@ async function buildAudioPipeline() {
     URL.revokeObjectURL(url);
 
     _audioWorkletNode = new AudioWorkletNode(_audioCtx, 'app-audio-processor', {
+      numberOfInputs: 0,
       outputChannelCount: [2],
     });
 
@@ -585,7 +597,15 @@ async function buildAudioPipeline() {
     window._havenAppAudioTrack  = _audioDestination.stream.getAudioTracks()[0];
     window._havenAppAudioStream = _audioDestination.stream;
 
-    console.log('[Haven Desktop] Per-app audio pipeline active (AudioWorklet)');
+    // Monitor AudioContext — BrowserView can re-suspend unexpectedly
+    window._havenAudioCtxMonitor = setInterval(() => {
+      if (_audioCtx && _audioCtx.state === 'suspended') {
+        console.warn('[Haven Desktop] AudioContext suspended — resuming');
+        _audioCtx.resume().catch(() => {});
+      }
+    }, 2000);
+
+    console.log('[Haven Desktop] Per-app audio pipeline active (AudioWorklet), ctx state:', _audioCtx.state);
     return true;
   } catch (err) {
     console.warn('[Haven Desktop] AudioWorklet pipeline failed, trying ScriptProcessor fallback:', err.message);
@@ -601,11 +621,16 @@ async function buildAudioPipeline() {
     if (_audioCtx.state === 'suspended') await _audioCtx.resume();
 
     const bufSize = 4096;
-    const scriptNode = _audioCtx.createScriptProcessor(bufSize, 0, 2);
+    // Use 1 input channel (not 0).  A "generator" ScriptProcessor with
+    // 0 inputs may not have its onaudioprocess callback pumped reliably
+    // in Electron / BrowserView environments.  Connecting a live source
+    // to the input guarantees Chromium's audio thread drives the node.
+    const scriptNode = _audioCtx.createScriptProcessor(bufSize, 1, 2);
     const ring   = new Float32Array(96000);
     let   wPos   = 0;
     let   rPos   = 0;
     let   avail  = 0;
+    let   _spProcessCount = 0;
 
     // Store a push function that the IPC handler can call
     window._havenAppAudioPush = (samples) => {
@@ -617,6 +642,7 @@ async function buildAudioPipeline() {
     };
 
     scriptNode.onaudioprocess = (e) => {
+      _spProcessCount++;
       const out = e.outputBuffer.getChannelData(0);
       if (avail < out.length) { out.fill(0); } else {
         for (let i = 0; i < out.length; i++) {
@@ -628,11 +654,24 @@ async function buildAudioPipeline() {
       // Copy mono to stereo
       const out1 = e.outputBuffer.getChannelData(1);
       out1.set(out);
+      // Periodic diagnostic
+      if (_spProcessCount === 1 || _spProcessCount % 200 === 0) {
+        const peak = Math.max(...Array.from(out.slice(0, 128)).map(Math.abs));
+        console.log(`[Haven Desktop] ScriptProcessor process #${_spProcessCount}, avail=${avail}, peak=${peak.toFixed(4)}`);
+      }
     };
 
     _audioDestination = _audioCtx.createMediaStreamDestination();
     scriptNode.connect(_audioDestination);
-    // Keep scriptNode alive by connecting to context destination (silenced)
+
+    // Drive the ScriptProcessor with a silent ConstantSourceNode so
+    // Chromium's audio thread always pulls from it.
+    const driver = _audioCtx.createConstantSource();
+    driver.offset.value = 0;
+    driver.connect(scriptNode);
+    driver.start();
+    // Also connect to context destination (silenced) as a second sink
+    // to ensure the graph stays active.
     const silencer = _audioCtx.createGain();
     silencer.gain.value = 0;
     scriptNode.connect(silencer);
@@ -645,7 +684,15 @@ async function buildAudioPipeline() {
     window._havenAppAudioTrack  = _audioDestination.stream.getAudioTracks()[0];
     window._havenAppAudioStream = _audioDestination.stream;
 
-    console.log('[Haven Desktop] Per-app audio pipeline active (ScriptProcessor fallback)');
+    // Monitor AudioContext — BrowserView can re-suspend unexpectedly
+    window._havenAudioCtxMonitor = setInterval(() => {
+      if (_audioCtx && _audioCtx.state === 'suspended') {
+        console.warn('[Haven Desktop] AudioContext suspended — resuming');
+        _audioCtx.resume().catch(() => {});
+      }
+    }, 2000);
+
+    console.log('[Haven Desktop] Per-app audio pipeline active (ScriptProcessor fallback), ctx state:', _audioCtx.state);
     return true;
   } catch (err) {
     console.error('[Haven Desktop] Audio pipeline setup failed completely:', err);
@@ -658,6 +705,12 @@ async function buildAudioPipeline() {
 }
 
 function teardownAudioPipeline() {
+  // Stop native capture first so IPC messages stop arriving
+  ipcRenderer.invoke('audio:stop-capture').catch(() => {});
+  if (window._havenAudioCtxMonitor) {
+    clearInterval(window._havenAudioCtxMonitor);
+    window._havenAudioCtxMonitor = null;
+  }
   _audioWorkletNode?.disconnect();
   _audioWorkletNode = null;
   _audioCtx?.close().catch(() => {});
@@ -665,10 +718,11 @@ function teardownAudioPipeline() {
   _audioDestination = null;
   _capturedAudioPid = null;
   _audioBufferQueue = [];
+  _ipcDataCount     = 0;
   window._havenAppAudioTrack  = null;
   window._havenAppAudioStream = null;
   window._havenAppAudioPush   = null;
-  ipcRenderer.invoke('audio:stop-capture').catch(() => {});
+  console.log('[Haven Desktop] Audio pipeline torn down');
 }
 
 // ═══════════════════════════════════════════════════════════

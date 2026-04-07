@@ -994,7 +994,15 @@ function registerScreenShareHandler() {
       if (result.audioAppPid && result.audioAppPid > 0) {
         try {
           audioCapture.startCapture(result.audioAppPid, (pcmData) => {
-            safeSend(targetContents, 'audio:capture-data', pcmData);
+            // Send as a plain ArrayBuffer (not Float32Array) for reliable
+            // cross-context structured-clone transfer.  Typed arrays can
+            // arrive in the renderer with non-zero byteOffset from Node's
+            // Buffer pool, causing silent alignment failures.
+            const ab = pcmData.buffer.slice(
+              pcmData.byteOffset,
+              pcmData.byteOffset + pcmData.byteLength
+            );
+            safeSend(targetContents, 'audio:capture-data', ab);
           });
           usePerAppAudio = true;
         } catch (err) {
@@ -1065,7 +1073,8 @@ function registerIPC() {
   // ── Audio Capture ─────────────────────────────────────
   ipcMain.handle('audio:get-apps',      () => { try { return audioCapture.getAudioApplications(); } catch { return []; } });
   ipcMain.handle('audio:start-capture',  (_e, pid) => audioCapture.startCapture(pid, pcm => {
-    safeSend(getActiveContents(), 'audio:capture-data', pcm);
+    const ab = pcm.buffer.slice(pcm.byteOffset, pcm.byteOffset + pcm.byteLength);
+    safeSend(getActiveContents(), 'audio:capture-data', ab);
   }));
   ipcMain.handle('audio:stop-capture',   () => audioCapture.stopCapture());
   ipcMain.handle('audio:is-supported',   () => audioCapture.isSupported());
