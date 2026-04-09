@@ -50,6 +50,7 @@ const store = new Store({
     startHidden:    false,    // start minimized to tray (when startOnLogin is enabled)
     minimizeToTray: false,    // close button hides to tray instead of quitting
     forceSDR:       false,    // force sRGB color profile (fixes HDR over-saturation)
+    hideMenuBar:    false,    // hide the File/Edit/View/Window/Help menu bar
   },
 });
 
@@ -333,6 +334,7 @@ function createAppWindow(serverUrl) {
       ...bounds,
       minWidth: 800, minHeight: 600,
       frame: true,
+      autoHideMenuBar: !!store.get('hideMenuBar'),
       backgroundColor: '#0d0d1a',
       icon: ICON_PATH,
       show: false,
@@ -1191,6 +1193,7 @@ function registerIPC() {
     startHidden:    !!store.get('startHidden'),
     minimizeToTray: !!store.get('minimizeToTray'),
     forceSDR:       !!store.get('forceSDR'),
+    hideMenuBar:    !!store.get('hideMenuBar'),
   }));
 
   ipcMain.handle('desktop:set-start-on-login', (_e, enabled) => {
@@ -1225,6 +1228,15 @@ function registerIPC() {
     store.set('forceSDR', !!enabled);
     // force-color-profile is a Chromium command-line switch, requires restart
     return { requiresRestart: true };
+  });
+
+  ipcMain.handle('desktop:set-hide-menu-bar', (_e, enabled) => {
+    store.set('hideMenuBar', !!enabled);
+    if (mainWindow) {
+      mainWindow.setAutoHideMenuBar(!!enabled);
+      mainWindow.setMenuBarVisibility(!enabled);
+    }
+    return true;
   });
 
   // ── Desktop Shortcuts ─────────────────────────────────
