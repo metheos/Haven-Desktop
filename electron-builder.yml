@@ -48,6 +48,9 @@ linux:
     Comment: Private self-hosted chat
     Terminal: false
 
+deb:
+  afterInstall: assets/linux/postinst.sh
+
 extraResources:
   - from: native/build/Release/
     to: native/
