@@ -95,8 +95,10 @@
         const remember = $('#chk-remember').checked;
         const serverUrl = res.url || `http://localhost:${res.port}`;
 
-        // Persist preferences
+        // Persist preferences (merge with existing to preserve audioInput etc.)
+        const existing = await window.haven.settings.get('userPrefs') || {};
         await window.haven.settings.set('userPrefs', {
+          ...existing,
           mode: 'host',
           serverUrl: serverUrl,
           serverPath: serverPath,
@@ -181,10 +183,12 @@
 
       const remember = $('#chk-remember').checked;
 
+      // Merge with existing prefs to preserve audioInput, serverPath, etc.
+      const existing = await window.haven.settings.get('userPrefs') || {};
       await window.haven.settings.set('userPrefs', {
+        ...existing,
         mode: 'join',
         serverUrl: serverUrl,
-        serverPath: null,
         skipWelcome: remember,
       });
 

@@ -1043,8 +1043,10 @@ function registerIPC() {
   ipcMain.handle('server:status',      ()        => serverManager.getStatus());
 
   ipcMain.handle('server:browse', async () => {
+    const lastPath = store.get('userPrefs.serverPath');
     const r = await dialog.showOpenDialog(welcomeWindow || mainWindow, {
       title: 'Select Haven Server Directory',
+      defaultPath: lastPath || undefined,
       properties: ['openDirectory'],
     });
     return r.canceled ? null : r.filePaths[0];

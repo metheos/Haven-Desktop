@@ -22,7 +22,7 @@ class ServerManager {
   detectServer() {
     const candidates = [];
 
-    // Saved path first
+    // Saved path first (from a previous successful launch)
     const saved = this.store.get('userPrefs.serverPath');
     if (saved) candidates.push(saved);
 
@@ -37,26 +37,32 @@ class ServerManager {
       candidates.push(path.join(home, 'Haven'));
       candidates.push(path.join(home, 'Desktop', 'Haven'));
       candidates.push(path.join(home, 'Documents', 'Haven'));
+      // Haven Server installer default: %APPDATA%\HavenServer
+      const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
+      candidates.push(path.join(appData, 'HavenServer'));
+      candidates.push(path.join(appData, 'Haven'));
+      candidates.push(path.join(appData, 'haven'));
       // Common install locations (e.g. Windows AppData / Programs)
       const localAppData = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
       candidates.push(path.join(localAppData, 'Programs', 'Haven'));
       candidates.push(path.join(localAppData, 'Programs', 'haven'));
       candidates.push(path.join(localAppData, 'Programs', 'haven-server'));
+      candidates.push(path.join(localAppData, 'Programs', 'HavenServer'));
       candidates.push(path.join(home, 'AppData', 'Local', 'Haven'));
     }
 
     for (const dir of candidates) {
-      const sjs = path.join(dir, 'server.js');
-      const pkg = path.join(dir, 'package.json');
+      try {
+        const sjs = path.join(dir, 'server.js');
+        const pkg = path.join(dir, 'package.json');
 
-      if (fs.existsSync(sjs) && fs.existsSync(pkg)) {
-        try {
+        if (fs.existsSync(sjs) && fs.existsSync(pkg)) {
           const json = JSON.parse(fs.readFileSync(pkg, 'utf-8'));
           if (json.name === 'haven') {
             return { found: true, path: dir, version: json.version };
           }
-        } catch { /* continue */ }
-      }
+        }
+      } catch { /* continue */ }
     }
 
     return { found: false, path: null };
