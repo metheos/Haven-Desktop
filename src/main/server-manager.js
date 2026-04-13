@@ -37,6 +37,12 @@ class ServerManager {
       candidates.push(path.join(home, 'Haven'));
       candidates.push(path.join(home, 'Desktop', 'Haven'));
       candidates.push(path.join(home, 'Documents', 'Haven'));
+      // Common install locations (e.g. Windows AppData / Programs)
+      const localAppData = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
+      candidates.push(path.join(localAppData, 'Programs', 'Haven'));
+      candidates.push(path.join(localAppData, 'Programs', 'haven'));
+      candidates.push(path.join(localAppData, 'Programs', 'haven-server'));
+      candidates.push(path.join(home, 'AppData', 'Local', 'Haven'));
     }
 
     for (const dir of candidates) {
