@@ -51,6 +51,7 @@ const store = new Store({
     minimizeToTray: false,    // close button hides to tray instead of quitting
     forceSDR:       false,    // force sRGB color profile (fixes HDR over-saturation)
     hideMenuBar:    false,    // hide the File/Edit/View/Window/Help menu bar
+    serverHistory:  [],       // [{url, name, lastConnected}] — recent server connections
   },
 });
 
@@ -748,6 +749,17 @@ function switchToServer(serverUrl) {
 
   mainWindow.setTopBrowserView(view);
   activeServerUrl = url;
+
+  // Save to server history
+  const _hist = store.get('serverHistory') || [];
+  const _hIdx = _hist.findIndex(h => h.url === url);
+  if (_hIdx >= 0) {
+    _hist[_hIdx].lastConnected = Date.now();
+  } else {
+    _hist.push({ url, name: url, lastConnected: Date.now() });
+  }
+  while (_hist.length > 20) _hist.shift();
+  store.set('serverHistory', _hist);
 }
 
 function handleWindowOpen(url) {
@@ -1268,6 +1280,38 @@ function registerIPC() {
     if (mainWindow && typeof serverUrl === 'string' && /^https?:\/\//i.test(serverUrl)) {
       try { switchToServer(new URL(serverUrl).origin); } catch {}
     }
+  });
+
+  // ── Change Primary Server (from login page server picker) ──
+  ipcMain.on('nav:change-primary-server', (_e, serverUrl) => {
+    if (!mainWindow || typeof serverUrl !== 'string' || !/^https?:\/\//i.test(serverUrl)) return;
+    try {
+      const newUrl = new URL(serverUrl).origin;
+      for (const [u, view] of serverViews) {
+        mainWindow.removeBrowserView(view);
+        try { view.webContents.destroy(); } catch {}
+      }
+      serverViews.clear();
+      serverBadgeState.clear();
+      primaryServerUrl = newUrl;
+      activeServerUrl = null;
+      store.set('userPrefs.serverUrl', newUrl);
+      store.set('userPrefs.mode', 'join');
+      switchToServer(newUrl);
+    } catch {}
+  });
+
+  // ── Server History ────────────────────────────────────
+  ipcMain.handle('server-history:get', () => store.get('serverHistory') || []);
+  ipcMain.handle('server-history:remove', (_e, url) => {
+    const history = (store.get('serverHistory') || []).filter(h => h.url !== url);
+    store.set('serverHistory', history);
+    return history;
+  });
+  ipcMain.handle('server-history:update-name', (_e, url, name) => {
+    const history = store.get('serverHistory') || [];
+    const entry = history.find(h => h.url === url);
+    if (entry && name) { entry.name = name; store.set('serverHistory', history); }
   });
 
   // ── External links ────────────────────────────────────

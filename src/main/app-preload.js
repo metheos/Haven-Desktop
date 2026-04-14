@@ -113,6 +113,83 @@ window.addEventListener('DOMContentLoaded', () => {
     #haven-desktop-footer .hdf-led {
       width: 8px; height: 8px; border-radius: 50%; background: #4ade80; flex-shrink: 0;
     }
+    #haven-desktop-footer .hdf-server-url { cursor: pointer; opacity: 0.6; transition: opacity 0.2s; font-size: 10px; }
+    #haven-desktop-footer .hdf-server-url:hover { opacity: 1; }
+
+    /* Switch Server button on login page — fixed above the desktop footer */
+    #haven-switch-server-btn {
+      position: fixed; bottom: 32px; left: 50%; transform: translateX(-50%);
+      z-index: 9998; padding: 8px 24px;
+      background: var(--bg-card, #1a1a2e); border: 1px solid var(--border, #444); border-radius: 8px;
+      color: var(--text-secondary, #aaa); font-size: 13px; cursor: pointer; transition: all 0.2s;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    }
+    #haven-switch-server-btn:hover {
+      background: var(--bg-hover, rgba(255,255,255,0.08));
+      color: var(--text-primary, #fff); border-color: var(--accent, #6b4fdb);
+    }
+
+    /* Server Picker Overlay */
+    #haven-server-picker-overlay {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.7); z-index: 99999;
+      display: flex; align-items: center; justify-content: center;
+    }
+    #haven-server-picker {
+      background: var(--bg-card, #1a1a2e); border: 1px solid var(--border, #444);
+      border-radius: 12px; padding: 24px; width: 400px; max-width: 90vw;
+      max-height: 80vh; overflow-y: auto; box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    }
+    #haven-server-picker h3 {
+      margin: 0 0 16px; color: var(--text-primary, #fff); font-size: 18px; text-align: center;
+    }
+    .hsp-form { display: flex; gap: 8px; }
+    .hsp-form input {
+      flex: 1; padding: 8px 12px; border-radius: 6px; border: 1px solid var(--border, #444);
+      background: var(--bg-primary, #0d0d1a); color: var(--text-primary, #fff); font-size: 13px; outline: none;
+    }
+    .hsp-form input:focus { border-color: var(--accent, #6b4fdb); }
+    .hsp-form button {
+      padding: 8px 16px; border-radius: 6px; border: none;
+      background: var(--accent, #6b4fdb); color: #fff; font-size: 13px; cursor: pointer; white-space: nowrap;
+    }
+    .hsp-form button:hover { opacity: 0.9; }
+    .hsp-form button:disabled { opacity: 0.5; cursor: default; }
+    .hsp-error { color: #ef4444; font-size: 12px; margin-top: 8px; text-align: center; }
+    .hsp-divider-label {
+      color: var(--text-muted, #666); font-size: 11px; text-transform: uppercase;
+      letter-spacing: 0.5px; margin: 16px 0 8px; padding-bottom: 4px;
+      border-bottom: 1px solid var(--border, #333);
+    }
+    .hsp-server-item {
+      display: flex; align-items: center; padding: 8px 10px; border-radius: 6px;
+      cursor: pointer; transition: background 0.15s;
+    }
+    .hsp-server-item:hover { background: var(--bg-hover, rgba(255,255,255,0.05)); }
+    .hsp-server-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+    .hsp-server-name {
+      color: var(--text-primary, #fff); font-size: 13px; font-weight: 500;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .hsp-server-url-label {
+      color: var(--text-muted, #666); font-size: 11px; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap;
+    }
+    .hsp-remove-btn {
+      background: transparent; border: none; color: var(--text-muted, #666);
+      font-size: 18px; cursor: pointer; padding: 4px 8px; border-radius: 4px; line-height: 1;
+    }
+    .hsp-remove-btn:hover { color: #ef4444; background: rgba(239,68,68,0.1); }
+    .hsp-cancel {
+      display: block; width: 100%; margin-top: 16px; padding: 8px;
+      background: transparent; border: 1px solid var(--border, #444); border-radius: 6px;
+      color: var(--text-secondary, #aaa); font-size: 13px; cursor: pointer;
+    }
+    .hsp-cancel:hover { background: var(--bg-hover, rgba(255,255,255,0.05)); }
+    .hsp-current-badge {
+      font-size: 9px; color: var(--accent, #6b4fdb); text-transform: uppercase;
+      letter-spacing: 0.5px; font-weight: 600;
+    }
 
     /* Push the rest of the page up so it's not hidden behind the fixed footer */
     #app { padding-bottom: 26px !important; }
@@ -134,8 +211,199 @@ window.addEventListener('DOMContentLoaded', () => {
     <div class="hdf-item"><span class="hdf-value" id="hdf-clock"></span></div>
     <div class="hdf-divider"></div>
     <div class="hdf-item"><span class="hdf-value hdf-version" id="hdf-version"></span></div>
+    <div class="hdf-divider"></div>
+    <div class="hdf-item"><span class="hdf-value hdf-server-url" id="hdf-server-url" title="Click to copy server address"></span></div>
   `;
   document.body.appendChild(bar);
+
+  // ── Server URL in footer (copyable on click) ──
+  const hdfUrlEl = document.getElementById('hdf-server-url');
+  if (hdfUrlEl) {
+    hdfUrlEl.textContent = window.location.origin;
+    hdfUrlEl.addEventListener('click', () => {
+      try {
+        require('electron').clipboard.writeText(window.location.origin);
+      } catch {
+        // Fallback: use a temporary textarea for copy
+        const ta = document.createElement('textarea');
+        ta.value = window.location.origin;
+        ta.style.cssText = 'position:fixed;left:-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        ta.remove();
+      }
+      const origText = hdfUrlEl.textContent;
+      hdfUrlEl.textContent = 'Copied!';
+      setTimeout(() => { hdfUrlEl.textContent = origText; }, 1500);
+    });
+  }
+
+  // ── Update server name in history from public config ──
+  fetch('/api/public-config').then(r => r.json()).then(d => {
+    if (d.server_title) {
+      ipcRenderer.invoke('server-history:update-name', window.location.origin, d.server_title);
+    }
+  }).catch(() => {});
+
+  // ── Login Page: Server Picker (desktop only) ─────────────────────────
+  if (document.querySelector('.auth-page')) {
+    const authContainer = document.querySelector('.auth-container');
+    if (authContainer) {
+      // Inject "Switch Server" button fixed to bottom of viewport
+      const switchBtn = document.createElement('button');
+      switchBtn.id = 'haven-switch-server-btn';
+      switchBtn.textContent = '⬡ Switch Server';
+      document.body.appendChild(switchBtn);
+
+      // Build the server picker overlay
+      const overlay = document.createElement('div');
+      overlay.id = 'haven-server-picker-overlay';
+      overlay.style.display = 'none';
+      overlay.innerHTML = `
+        <div id="haven-server-picker">
+          <h3>Switch Server</h3>
+          <div class="hsp-form">
+            <input type="text" id="hsp-url-input" placeholder="https://haven.example.com" spellcheck="false" autocomplete="off">
+            <button id="hsp-connect-btn">Connect</button>
+          </div>
+          <div id="hsp-error" class="hsp-error" style="display:none"></div>
+          <div id="hsp-recent-section" style="display:none">
+            <div class="hsp-divider-label">Recent Servers</div>
+            <div id="hsp-recent-list"></div>
+          </div>
+          <button id="hsp-cancel-btn" class="hsp-cancel">Cancel</button>
+        </div>
+      `;
+      document.body.appendChild(overlay);
+
+      // Show overlay
+      switchBtn.addEventListener('click', async () => {
+        overlay.style.display = 'flex';
+        document.getElementById('hsp-url-input').value = '';
+        document.getElementById('hsp-error').style.display = 'none';
+        document.getElementById('hsp-url-input').focus();
+        await loadRecentServers();
+      });
+
+      // Close overlay
+      document.getElementById('hsp-cancel-btn').addEventListener('click', () => {
+        overlay.style.display = 'none';
+      });
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) overlay.style.display = 'none';
+      });
+
+      // Connect to entered URL
+      const urlInput = document.getElementById('hsp-url-input');
+      const connectBtn = document.getElementById('hsp-connect-btn');
+      const errorEl = document.getElementById('hsp-error');
+
+      urlInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !connectBtn.disabled) connectBtn.click();
+      });
+
+      connectBtn.addEventListener('click', async () => {
+        let url = urlInput.value.trim();
+        errorEl.style.display = 'none';
+        if (!url) return;
+
+        if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+
+        try { url = new URL(url).origin; } catch {
+          errorEl.textContent = 'Please enter a valid URL.';
+          errorEl.style.display = 'block';
+          return;
+        }
+
+        connectBtn.disabled = true;
+        connectBtn.textContent = 'Connecting\u2026';
+
+        try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 8000);
+          const res = await fetch(url + '/api/health', { signal: controller.signal }).catch(() => null);
+          clearTimeout(timeout);
+
+          if (!res || !res.ok) {
+            errorEl.textContent = 'Could not reach server. Check the address and try again.';
+            errorEl.style.display = 'block';
+            return;
+          }
+
+          ipcRenderer.send('nav:change-primary-server', url);
+        } catch {
+          errorEl.textContent = 'Connection failed. Check the address and try again.';
+          errorEl.style.display = 'block';
+        } finally {
+          connectBtn.disabled = false;
+          connectBtn.textContent = 'Connect';
+        }
+      });
+
+      // Load and display recent servers
+      async function loadRecentServers() {
+        const history = await ipcRenderer.invoke('server-history:get');
+        const recentSection = document.getElementById('hsp-recent-section');
+        const recentList = document.getElementById('hsp-recent-list');
+        const currentUrl = window.location.origin;
+
+        // Filter out the server we're currently on
+        const filtered = (history || []).filter(h => h.url !== currentUrl);
+        if (filtered.length === 0) {
+          recentSection.style.display = 'none';
+          return;
+        }
+
+        recentSection.style.display = 'block';
+        recentList.innerHTML = '';
+
+        // Sort by lastConnected descending (most recent first)
+        filtered.sort((a, b) => (b.lastConnected || 0) - (a.lastConnected || 0));
+
+        filtered.forEach(entry => {
+          const item = document.createElement('div');
+          item.className = 'hsp-server-item';
+
+          const info = document.createElement('div');
+          info.className = 'hsp-server-info';
+
+          let displayName;
+          try {
+            displayName = (entry.name && entry.name !== entry.url) ? entry.name : new URL(entry.url).hostname;
+          } catch {
+            displayName = entry.url;
+          }
+
+          const nameSpan = document.createElement('span');
+          nameSpan.className = 'hsp-server-name';
+          nameSpan.textContent = displayName;
+          const urlSpan = document.createElement('span');
+          urlSpan.className = 'hsp-server-url-label';
+          urlSpan.textContent = entry.url;
+          info.appendChild(nameSpan);
+          info.appendChild(urlSpan);
+          info.addEventListener('click', () => {
+            ipcRenderer.send('nav:change-primary-server', entry.url);
+          });
+
+          const removeBtn = document.createElement('button');
+          removeBtn.className = 'hsp-remove-btn';
+          removeBtn.textContent = '\u00d7';
+          removeBtn.title = 'Remove from history';
+          removeBtn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            await ipcRenderer.invoke('server-history:remove', entry.url);
+            await loadRecentServers();
+          });
+
+          item.appendChild(info);
+          item.appendChild(removeBtn);
+          recentList.appendChild(item);
+        });
+      }
+    }
+  }
 
   // Sync data from the original (hidden) status bar elements every 500ms
   setInterval(() => {
