@@ -1008,15 +1008,20 @@ function registerScreenShareHandler() {
       if (result.audioAppPid && result.audioAppPid > 0) {
         try {
           audioCapture.startCapture(result.audioAppPid, (pcmData) => {
-            // Send as a plain ArrayBuffer (not Float32Array) for reliable
-            // cross-context structured-clone transfer.  Typed arrays can
-            // arrive in the renderer with non-zero byteOffset from Node's
-            // Buffer pool, causing silent alignment failures.
-            const ab = pcmData.buffer.slice(
-              pcmData.byteOffset,
-              pcmData.byteOffset + pcmData.byteLength
-            );
-            safeSend(targetContents, 'audio:capture-data', ab);
+            try {
+              if (!pcmData || !pcmData.buffer) return;
+              // Send as a plain ArrayBuffer (not Float32Array) for reliable
+              // cross-context structured-clone transfer.  Typed arrays can
+              // arrive in the renderer with non-zero byteOffset from Node's
+              // Buffer pool, causing silent alignment failures.
+              const ab = pcmData.buffer.slice(
+                pcmData.byteOffset,
+                pcmData.byteOffset + pcmData.byteLength
+              );
+              safeSend(targetContents, 'audio:capture-data', ab);
+            } catch (cbErr) {
+              console.warn('[ScreenShare] audio callback error:', cbErr.message);
+            }
           });
           usePerAppAudio = true;
         } catch (err) {
@@ -1088,12 +1093,19 @@ function registerIPC() {
 
   // ── Audio Capture ─────────────────────────────────────
   ipcMain.handle('audio:get-apps',      () => { try { return audioCapture.getAudioApplications(); } catch { return []; } });
-  ipcMain.handle('audio:start-capture',  (_e, pid) => audioCapture.startCapture(pid, pcm => {
-    const ab = pcm.buffer.slice(pcm.byteOffset, pcm.byteOffset + pcm.byteLength);
-    safeSend(getActiveContents(), 'audio:capture-data', ab);
-  }));
-  ipcMain.handle('audio:stop-capture',   () => audioCapture.stopCapture());
-  ipcMain.handle('audio:is-supported',   () => audioCapture.isSupported());
+  ipcMain.handle('audio:start-capture',  (_e, pid) => {
+    try {
+      return audioCapture.startCapture(pid, pcm => {
+        try {
+          if (!pcm || !pcm.buffer) return;
+          const ab = pcm.buffer.slice(pcm.byteOffset, pcm.byteOffset + pcm.byteLength);
+          safeSend(getActiveContents(), 'audio:capture-data', ab);
+        } catch { /* non-critical */ }
+      });
+    } catch (e) { console.error('[AudioCapture] start-capture IPC failed:', e.message); return false; }
+  });
+  ipcMain.handle('audio:stop-capture',   () => { try { audioCapture.stopCapture(); } catch {} });
+  ipcMain.handle('audio:is-supported',   () => { try { return audioCapture.isSupported(); } catch { return false; } });
   ipcMain.handle('audio:opt-out-ducking', () => audioCapture.optOutOfDucking());
 
   // ── Audio Devices ─────────────────────────────────────
