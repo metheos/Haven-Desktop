@@ -115,6 +115,12 @@ window.addEventListener('DOMContentLoaded', () => {
     }
     #haven-desktop-footer .hdf-server-url { cursor: pointer; opacity: 0.6; transition: opacity 0.2s; font-size: 10px; }
     #haven-desktop-footer .hdf-server-url:hover { opacity: 1; }
+    #haven-desktop-footer .hdf-server-url.hdf-hidden { letter-spacing: 2px; }
+    #haven-desktop-footer .hdf-url-toggle {
+      cursor: pointer; opacity: 0.4; transition: opacity 0.2s; font-size: 11px;
+      background: none; border: none; color: inherit; padding: 0 4px; line-height: 1;
+    }
+    #haven-desktop-footer .hdf-url-toggle:hover { opacity: 1; }
 
     /* Switch Server button on login page — fixed above the desktop footer */
     #haven-switch-server-btn {
@@ -212,21 +218,44 @@ window.addEventListener('DOMContentLoaded', () => {
     <div class="hdf-divider"></div>
     <div class="hdf-item"><span class="hdf-value hdf-version" id="hdf-version"></span></div>
     <div class="hdf-divider"></div>
-    <div class="hdf-item"><span class="hdf-value hdf-server-url" id="hdf-server-url" title="Click to copy server address"></span></div>
+    <div class="hdf-item"><span class="hdf-value hdf-server-url" id="hdf-server-url" title="Click to copy server address"></span><button class="hdf-url-toggle" id="hdf-url-toggle" title="Show/hide server address">👁</button></div>
   `;
   document.body.appendChild(bar);
 
-  // ── Server URL in footer (copyable on click) ──
+  // ── Server URL in footer (copyable on click, privacy toggle) ──
   const hdfUrlEl = document.getElementById('hdf-server-url');
-  if (hdfUrlEl) {
-    hdfUrlEl.textContent = window.location.origin;
+  const hdfUrlToggle = document.getElementById('hdf-url-toggle');
+  const _serverOrigin = window.location.origin;
+  let _urlVisible = localStorage.getItem('hdf-show-url') !== 'false';
+
+  function _applyUrlVisibility() {
+    if (_urlVisible) {
+      hdfUrlEl.textContent = _serverOrigin;
+      hdfUrlEl.classList.remove('hdf-hidden');
+      hdfUrlToggle.textContent = '👁';
+      hdfUrlToggle.title = 'Hide server address';
+    } else {
+      hdfUrlEl.textContent = '••••••••';
+      hdfUrlEl.classList.add('hdf-hidden');
+      hdfUrlToggle.textContent = '👁‍🗨';
+      hdfUrlToggle.title = 'Show server address';
+    }
+  }
+
+  if (hdfUrlEl && hdfUrlToggle) {
+    _applyUrlVisibility();
+    hdfUrlToggle.addEventListener('click', () => {
+      _urlVisible = !_urlVisible;
+      localStorage.setItem('hdf-show-url', _urlVisible);
+      _applyUrlVisibility();
+    });
     hdfUrlEl.addEventListener('click', () => {
+      if (!_urlVisible) return;
       try {
-        require('electron').clipboard.writeText(window.location.origin);
+        require('electron').clipboard.writeText(_serverOrigin);
       } catch {
-        // Fallback: use a temporary textarea for copy
         const ta = document.createElement('textarea');
-        ta.value = window.location.origin;
+        ta.value = _serverOrigin;
         ta.style.cssText = 'position:fixed;left:-9999px';
         document.body.appendChild(ta);
         ta.select();
