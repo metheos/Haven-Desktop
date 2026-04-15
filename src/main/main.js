@@ -198,7 +198,7 @@ app.whenReady().then(async () => {
   });
 
   // Auto-grant camera, mic, screen-share, fullscreen, and PiP permissions for all server views
-  const ALLOWED_PERMS = ['media', 'mediaKeySystem', 'display-capture', 'notifications', 'fullscreen', 'window-management', 'picture-in-picture'];
+  const ALLOWED_PERMS = ['media', 'mediaKeySystem', 'display-capture', 'notifications', 'fullscreen', 'window-management', 'picture-in-picture', 'clipboard-write', 'clipboard-read'];
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
     callback(ALLOWED_PERMS.includes(permission));
   });
