@@ -1154,6 +1154,11 @@ window.havenDesktop = {
 
   getVersion: () => ipcRenderer.invoke('app:version'),
 
+  /** Access the Desktop-level server history (persists across all servers) */
+  getServerHistory: () => ipcRenderer.invoke('server-history:get'),
+  addServerHistory: (url, name) => ipcRenderer.invoke('server-history:add', url, name),
+  removeServerHistory: (url) => ipcRenderer.invoke('server-history:remove', url),
+
   /** Desktop app preferences (start on login, minimize to tray, HDR/SDR) */
   prefs: {
     get:              ()      => ipcRenderer.invoke('desktop:get-prefs'),

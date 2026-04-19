@@ -1315,6 +1315,13 @@ function registerIPC() {
 
   // ── Server History ────────────────────────────────────
   ipcMain.handle('server-history:get', () => store.get('serverHistory') || []);
+  ipcMain.handle('server-history:add', (_e, url, name) => {
+    const history = store.get('serverHistory') || [];
+    if (history.find(h => h.url === url)) return; // already exists
+    history.push({ url, name: name || url, lastConnected: 0 });
+    while (history.length > 20) history.shift();
+    store.set('serverHistory', history);
+  });
   ipcMain.handle('server-history:remove', (_e, url) => {
     const history = (store.get('serverHistory') || []).filter(h => h.url !== url);
     store.set('serverHistory', history);
