@@ -1,5 +1,22 @@
 # Haven Desktop Changelog
 
+## v1.3.0
+
+### Added
+- **Server history and server picker** — the login page now remembers previously connected servers and lets you pick from them instead of re-typing the URL each time.
+- **Hide menu bar setting** — a new toggle in Settings → Desktop App hides the native menu bar (alt to show temporarily). Windows and Linux only.
+- **Privacy toggle for server address** — the server address shown in the desktop footer can now be hidden, matching the web privacy toggle.
+
+### Fixed
+- **Image copy permissions** — clipboard-write and clipboard-read permissions are now properly granted so copying images from chat works correctly in the desktop app.
+- **Per-app audio crash on Linux** — added safety wrapping to per-app audio capture callbacks to prevent a crash when the audio pipeline is torn down mid-capture on Linux. (#5254)
+- **Local server detection improvements** — local server paths are now persisted more reliably, and additional installer paths are recognized on first run, reducing "server not found" false negatives. (#22)
+- **AppData install paths** — server discovery now includes AppData install locations so self-hosted instances installed there are detected automatically.
+- **.deb sandbox permissions** — the Debian package now auto-fixes the chrome-sandbox SUID bit during post-install, resolving the startup failure on some Linux distributions.
+- **License references** — updated all license headers and references to AGPL-3.0.
+
+---
+
 ## v1.2.0
 
 ### Fixed
