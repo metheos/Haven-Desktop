@@ -427,6 +427,11 @@ function createAppWindow(serverUrl) {
 
   switchToServer(serverUrl);
 
+  // Pre-load background BrowserViews for the user's other known servers so
+  // their unread counts can light up the sidebar dots in real time. Toggle
+  // via Desktop settings (default: on). Capped to keep RAM usage reasonable.
+  scheduleBackgroundServerPreload(serverUrl);
+
   if (!mainWindow.isVisible() && !START_HIDDEN) {
     mainWindow.show();
     if (welcomeWindow) welcomeWindow.close();
@@ -441,8 +446,37 @@ function switchToServer(serverUrl) {
   const url = normalizeServerUrl(serverUrl);
   if (!mainWindow) return;
 
+  // Reuse a pre-created background view if one exists, otherwise create
+  ensureServerView(url);
+  const view = serverViews.get(url);
+  if (!view) return;
+
+  mainWindow.setTopBrowserView(view);
+  activeServerUrl = url;
+
+  // Save to server history
+  const _hist = store.get('serverHistory') || [];
+  const _hIdx = _hist.findIndex(h => h.url === url);
+  if (_hIdx >= 0) {
+    _hist[_hIdx].lastConnected = Date.now();
+  } else {
+    _hist.push({ url, name: url, lastConnected: Date.now() });
+  }
+  while (_hist.length > 20) _hist.shift();
+  store.set('serverHistory', _hist);
+}
+
+// Pre-create a BrowserView for a server WITHOUT making it the visible/active
+// view. Lets background servers run their renderer (and thus their socket
+// connections) so per-server unread badges can light up on the sidebar of
+// the active view. Idempotent — second call for the same URL is a no-op.
+function ensureServerView(serverUrl, { background = false } = {}) {
+  const url = normalizeServerUrl(serverUrl);
+  if (!mainWindow) return null;
   let view = serverViews.get(url);
-  if (!view) {
+  if (view) return view;
+
+  {
     view = new BrowserView({
       webPreferences: {
         preload: path.join(__dirname, 'app-preload.js'),
@@ -811,19 +845,43 @@ function switchToServer(serverUrl) {
     serverViews.set(url, view);
   }
 
-  mainWindow.setTopBrowserView(view);
-  activeServerUrl = url;
+  return view;
+}
 
-  // Save to server history
-  const _hist = store.get('serverHistory') || [];
-  const _hIdx = _hist.findIndex(h => h.url === url);
-  if (_hIdx >= 0) {
-    _hist[_hIdx].lastConnected = Date.now();
-  } else {
-    _hist.push({ url, name: url, lastConnected: Date.now() });
-  }
-  while (_hist.length > 20) _hist.shift();
-  store.set('serverHistory', _hist);
+// Default cap on how many secondary servers we'll pre-load in the background.
+// Each background view is a full Chromium renderer + Socket.IO connection, so
+// this is the dial that controls how memory-heavy the desktop app gets when
+// the user has lots of servers added.
+const BACKGROUND_SERVER_CAP = 8;
+
+function scheduleBackgroundServerPreload(activeServerUrl) {
+  // Off-switch: setting `backgroundServerConnections` to false disables
+  // pre-loading entirely, restoring the old lazy behavior.
+  const enabled = store.get('backgroundServerConnections');
+  if (enabled === false) return;
+
+  // Wait a few seconds so the active view's first paint isn't competing
+  // with N background renderers spinning up at the same moment.
+  setTimeout(() => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    const activeNorm = normalizeServerUrl(activeServerUrl);
+    const history = sanitizeServerHistory(store.get('serverHistory') || []);
+    let started = 0;
+    for (const entry of history) {
+      if (started >= BACKGROUND_SERVER_CAP) break;
+      const url = entry.url;
+      if (!url || url === activeNorm || serverViews.has(url)) continue;
+      try {
+        ensureServerView(url, { background: true });
+        started++;
+      } catch (e) {
+        console.warn('[Haven Desktop] Background preload failed for', url, e.message);
+      }
+    }
+    if (started > 0) {
+      console.log(`[Haven Desktop] Pre-loaded ${started} background server view${started === 1 ? '' : 's'} for unread badges`);
+    }
+  }, 4000);
 }
 
 function handleWindowOpen(url) {
@@ -1389,6 +1447,18 @@ function registerIPC() {
       store.set('serverHistory', cleaned);
     }
     return cleaned;
+  });
+  // Synchronous variant for preload bootstrap. The renderer can't wait on a
+  // promise before the page-scripts run, but it CAN do a sendSync at preload
+  // time. This lets the sidebar populate with the user's known servers on
+  // first-join to a brand-new server before any network calls happen.
+  ipcMain.on('server-history:get-sync', (e) => {
+    try {
+      const raw = store.get('serverHistory') || [];
+      e.returnValue = sanitizeServerHistory(raw);
+    } catch {
+      e.returnValue = [];
+    }
   });
   ipcMain.handle('server-history:add', (_e, url, name) => {
     const normalizedUrl = normalizeServerUrl(url);

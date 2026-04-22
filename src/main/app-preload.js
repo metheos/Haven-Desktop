@@ -222,15 +222,33 @@ window.addEventListener('DOMContentLoaded', () => {
   `;
   document.body.appendChild(bar);
 
+  function _normalizeDesktopServerUrl(input = window.location.href) {
+    let value = String(input || '').trim();
+    if (!value) return '';
+    if (!/^https?:\/\//i.test(value)) value = 'https://' + value;
+    try {
+      const parsed = new URL(value);
+      parsed.hash = '';
+      parsed.search = '';
+      let pathname = parsed.pathname || '/';
+      pathname = pathname.replace(/\/+$/, '') || '/';
+      pathname = pathname.replace(/\/app(?:\.html)?$/i, '') || '/';
+      pathname = pathname.replace(/\/+$/, '') || '/';
+      return pathname === '/' ? parsed.origin : parsed.origin + pathname;
+    } catch {
+      return value.replace(/\/+$/, '');
+    }
+  }
+
   // ── Server URL in footer (copyable on click, privacy toggle) ──
   const hdfUrlEl = document.getElementById('hdf-server-url');
   const hdfUrlToggle = document.getElementById('hdf-url-toggle');
-  const _serverOrigin = window.location.origin;
+  const _serverUrl = _normalizeDesktopServerUrl();
   let _urlVisible = localStorage.getItem('hdf-show-url') !== 'false';
 
   function _applyUrlVisibility() {
     if (_urlVisible) {
-      hdfUrlEl.textContent = _serverOrigin;
+      hdfUrlEl.textContent = _serverUrl;
       hdfUrlEl.classList.remove('hdf-hidden');
       hdfUrlToggle.textContent = '👁';
       hdfUrlToggle.title = 'Hide server address';
@@ -252,10 +270,10 @@ window.addEventListener('DOMContentLoaded', () => {
     hdfUrlEl.addEventListener('click', () => {
       if (!_urlVisible) return;
       try {
-        require('electron').clipboard.writeText(_serverOrigin);
+        require('electron').clipboard.writeText(_serverUrl);
       } catch {
         const ta = document.createElement('textarea');
-        ta.value = _serverOrigin;
+        ta.value = _serverUrl;
         ta.style.cssText = 'position:fixed;left:-9999px';
         document.body.appendChild(ta);
         ta.select();
@@ -271,7 +289,7 @@ window.addEventListener('DOMContentLoaded', () => {
   // ── Update server name in history from public config ──
   fetch('/api/public-config').then(r => r.json()).then(d => {
     if (d.server_title) {
-      ipcRenderer.invoke('server-history:update-name', window.location.origin, d.server_title);
+      ipcRenderer.invoke('server-history:update-name', _serverUrl, d.server_title);
     }
   }).catch(() => {});
 
@@ -337,9 +355,8 @@ window.addEventListener('DOMContentLoaded', () => {
         errorEl.style.display = 'none';
         if (!url) return;
 
-        if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
-
-        try { url = new URL(url).origin; } catch {
+        url = _normalizeDesktopServerUrl(url);
+        if (!url || !/^https?:\/\//i.test(url)) {
           errorEl.textContent = 'Please enter a valid URL.';
           errorEl.style.display = 'block';
           return;
@@ -375,10 +392,10 @@ window.addEventListener('DOMContentLoaded', () => {
         const history = await ipcRenderer.invoke('server-history:get');
         const recentSection = document.getElementById('hsp-recent-section');
         const recentList = document.getElementById('hsp-recent-list');
-        const currentUrl = window.location.origin;
+        const currentUrl = _normalizeDesktopServerUrl();
 
         // Filter out the server we're currently on
-        const filtered = (history || []).filter(h => h.url !== currentUrl);
+        const filtered = (history || []).filter(h => _normalizeDesktopServerUrl(h.url) !== currentUrl);
         if (filtered.length === 0) {
           recentSection.style.display = 'none';
           return;
@@ -1158,6 +1175,14 @@ window.havenDesktop = {
   getServerHistory: () => ipcRenderer.invoke('server-history:get'),
   addServerHistory: (url, name) => ipcRenderer.invoke('server-history:add', url, name),
   removeServerHistory: (url) => ipcRenderer.invoke('server-history:remove', url),
+
+  /** Synchronous snapshot of the cross-server history at page-load time.
+   *  Lets the sidebar populate immediately on first-join to a brand-new
+   *  server, before any auth or sync round-trips have completed. */
+  initialServerHistory: (() => {
+    try { return ipcRenderer.sendSync('server-history:get-sync') || []; }
+    catch { return []; }
+  })(),
 
   /** Desktop app preferences (start on login, minimize to tray, HDR/SDR) */
   prefs: {
