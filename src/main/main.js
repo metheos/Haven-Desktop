@@ -101,6 +101,58 @@ let badgeIcon       = null;
 let serverBadgeState = new Map();  // serverUrl → boolean (true = has unreads)
 let _logBuf = '', _logTimer = null;  // server log batch buffer (module-scope so crash handler can clear)
 
+function normalizeServerUrl(serverUrl) {
+  let value = String(serverUrl || '').trim();
+  if (!value) return '';
+  if (!/^https?:\/\//i.test(value)) value = 'https://' + value;
+  try {
+    const parsed = new URL(value);
+    parsed.hash = '';
+    parsed.search = '';
+    let pathname = parsed.pathname || '/';
+    pathname = pathname.replace(/\/+$/, '') || '/';
+    pathname = pathname.replace(/\/app(?:\.html)?$/i, '') || '/';
+    pathname = pathname.replace(/\/+$/, '') || '/';
+    return pathname === '/' ? parsed.origin : parsed.origin + pathname;
+  } catch {
+    return value.replace(/\/+$/, '');
+  }
+}
+
+// Reject obvious garbage (e.g. "https://https", bare words with no TLD)
+// while still allowing localhost and IP literals.
+function isValidServerHost(serverUrl) {
+  try {
+    const host = new URL(serverUrl).hostname;
+    if (!host) return false;
+    if (host === 'localhost') return true;
+    if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) return true; // IPv4
+    if (host.includes(':')) return true; // IPv6 / bracketed
+    return host.includes('.') && !/^https?$/i.test(host);
+  } catch { return false; }
+}
+
+// Dedup + clean a stored serverHistory list. Re-normalizes URLs (lowercases
+// host, strips /app paths) and drops malformed entries left over from earlier
+// versions that didn't validate input.
+function sanitizeServerHistory(list) {
+  const seen = new Set();
+  const out = [];
+  for (const entry of (list || [])) {
+    if (!entry || !entry.url) continue;
+    const normalizedUrl = normalizeServerUrl(entry.url);
+    if (!normalizedUrl || !isValidServerHost(normalizedUrl)) continue;
+    if (seen.has(normalizedUrl)) continue;
+    seen.add(normalizedUrl);
+    out.push({ ...entry, url: normalizedUrl });
+  }
+  return out;
+}
+
+function buildServerAppUrl(serverUrl) {
+  return normalizeServerUrl(serverUrl) + '/app.html';
+}
+
 // ── Single-Instance Lock ──────────────────────────────────
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) { app.quit(); }
@@ -386,9 +438,7 @@ function createAppWindow(serverUrl) {
 // ── Multi-Server View Management ────────────────────────────
 
 function switchToServer(serverUrl) {
-  // Strip to origin to prevent double-path issues (e.g. user enters /app, then we append /app.html)
-  let url;
-  try { url = new URL(serverUrl).origin; } catch { url = serverUrl.replace(/\/+$/, ''); }
+  const url = normalizeServerUrl(serverUrl);
   if (!mainWindow) return;
 
   let view = serverViews.get(url);
@@ -407,7 +457,7 @@ function switchToServer(serverUrl) {
     view.setBounds({ x: 0, y: 0, width: w, height: h });
     view.setAutoResize({ width: true, height: true });
 
-    view.webContents.loadURL(url + '/app.html');
+    view.webContents.loadURL(buildServerAppUrl(url));
 
     // ── Forward renderer performance logs to main process console ──
     // The renderer's automatic perf diagnostics use console.warn/log with
@@ -419,6 +469,20 @@ function switchToServer(serverUrl) {
         if (level >= 2) console.warn('[Renderer]', message);
         else            console.log('[Renderer]', message);
       }
+    });
+
+    // BrowserView keyboard accelerators can fail to trigger Chromium's
+    // built-in copy command on some Windows setups. Forward Ctrl/Cmd+C
+    // explicitly so selected message text reaches the clipboard.
+    view.webContents.on('before-input-event', (event, input) => {
+      const isCopy = input.type === 'keyDown'
+        && !input.isAutoRepeat
+        && (input.control || input.meta)
+        && !input.alt
+        && String(input.key || '').toLowerCase() === 'c';
+      if (!isCopy) return;
+      event.preventDefault();
+      try { view.webContents.copy(); } catch {}
     });
 
     // ── Page load timeout — if no content after 15 s, offer to go back ──
@@ -605,7 +669,7 @@ function switchToServer(serverUrl) {
       const delay = 1500 * Math.pow(2, _crashCount - 1); // 1.5 s, 3 s, 6 s, 12 s, 24 s
       setTimeout(() => {
         if (!mainWindow || !serverViews.has(url)) return;
-        try { view.webContents.loadURL(url + '/app.html'); } catch {}
+        try { view.webContents.loadURL(buildServerAppUrl(url)); } catch {}
       }, delay);
       // Reset counter after a period of stability
       _crashStabilityTimer = setTimeout(() => { _crashCount = 0; }, CRASH_WINDOW_MS);
@@ -619,7 +683,7 @@ function switchToServer(serverUrl) {
       _unresponsiveTimer = setTimeout(() => {
         _unresponsiveTimer = null;
         if (!mainWindow || !serverViews.has(url)) return;
-        try { view.webContents.loadURL(url + '/app.html'); } catch {}
+        try { view.webContents.loadURL(buildServerAppUrl(url)); } catch {}
       }, 5000);
     });
     view.webContents.on('responsive', () => {
@@ -684,7 +748,7 @@ function switchToServer(serverUrl) {
             console.warn(`[Haven Desktop] Renderer memory ${Math.round(memMB)} MB exceeds ${MEM_THRESHOLD_MB} MB — clearing caches & reloading`);
             _lastMemReload = Date.now();
             try { view.webContents.session.clearCache().catch(() => {}); } catch {}
-            try { view.webContents.loadURL(url + '/app.html'); } catch {}
+            try { view.webContents.loadURL(buildServerAppUrl(url)); } catch {}
             return; // skip soft trim — we're reloading
           }
         }
@@ -737,7 +801,7 @@ function switchToServer(serverUrl) {
       try {
         if (view.webContents.isCrashed()) {
           console.warn('[Haven Desktop] Health check: renderer crashed, reloading…');
-          view.webContents.loadURL(url + '/app.html');
+          view.webContents.loadURL(buildServerAppUrl(url));
         }
       } catch {}
     }, 30000); // check every 30 seconds
@@ -769,8 +833,9 @@ function handleWindowOpen(url) {
       // Only switch within the app for servers already registered in this session.
       // Unknown external URLs (including friends' Haven servers) open in the system
       // browser — trying to auto-load them risks a failed navigation that resets the session.
-      if (serverViews.has(parsed.origin)) {
-        switchToServer(parsed.origin);
+      const normalizedUrl = normalizeServerUrl(url);
+      if (serverViews.has(normalizedUrl)) {
+        switchToServer(normalizedUrl);
         return;
       }
     }
@@ -1290,7 +1355,7 @@ function registerIPC() {
   ipcMain.on('nav:back-to-welcome', () => resetToWelcome());
   ipcMain.on('nav:switch-server', (_e, serverUrl) => {
     if (mainWindow && typeof serverUrl === 'string' && /^https?:\/\//i.test(serverUrl)) {
-      try { switchToServer(new URL(serverUrl).origin); } catch {}
+      switchToServer(normalizeServerUrl(serverUrl));
     }
   });
 
@@ -1298,7 +1363,7 @@ function registerIPC() {
   ipcMain.on('nav:change-primary-server', (_e, serverUrl) => {
     if (!mainWindow || typeof serverUrl !== 'string' || !/^https?:\/\//i.test(serverUrl)) return;
     try {
-      const newUrl = new URL(serverUrl).origin;
+      const newUrl = normalizeServerUrl(serverUrl);
       for (const [u, view] of serverViews) {
         mainWindow.removeBrowserView(view);
         try { view.webContents.destroy(); } catch {}
@@ -1314,23 +1379,42 @@ function registerIPC() {
   });
 
   // ── Server History ────────────────────────────────────
-  ipcMain.handle('server-history:get', () => store.get('serverHistory') || []);
+  // Sanitize on read so legacy entries with mixed casing, /app paths, or
+  // garbage hostnames (e.g. someone typed "https") get cleaned up the next
+  // time the renderer asks for the list.
+  ipcMain.handle('server-history:get', () => {
+    const raw = store.get('serverHistory') || [];
+    const cleaned = sanitizeServerHistory(raw);
+    if (cleaned.length !== raw.length || cleaned.some((c, i) => c.url !== raw[i]?.url)) {
+      store.set('serverHistory', cleaned);
+    }
+    return cleaned;
+  });
   ipcMain.handle('server-history:add', (_e, url, name) => {
-    const history = store.get('serverHistory') || [];
-    if (history.find(h => h.url === url)) return; // already exists
-    history.push({ url, name: name || url, lastConnected: 0 });
+    const normalizedUrl = normalizeServerUrl(url);
+    if (!normalizedUrl || !isValidServerHost(normalizedUrl)) return;
+    const history = sanitizeServerHistory(store.get('serverHistory') || []);
+    if (history.find(h => h.url === normalizedUrl)) {
+      store.set('serverHistory', history);
+      return;
+    }
+    history.push({ url: normalizedUrl, name: name || normalizedUrl, lastConnected: 0 });
     while (history.length > 20) history.shift();
     store.set('serverHistory', history);
   });
   ipcMain.handle('server-history:remove', (_e, url) => {
-    const history = (store.get('serverHistory') || []).filter(h => h.url !== url);
+    const normalizedUrl = normalizeServerUrl(url);
+    const history = sanitizeServerHistory(store.get('serverHistory') || [])
+      .filter(h => h.url !== normalizedUrl);
     store.set('serverHistory', history);
     return history;
   });
   ipcMain.handle('server-history:update-name', (_e, url, name) => {
-    const history = store.get('serverHistory') || [];
-    const entry = history.find(h => h.url === url);
-    if (entry && name) { entry.name = name; store.set('serverHistory', history); }
+    const normalizedUrl = normalizeServerUrl(url);
+    const history = sanitizeServerHistory(store.get('serverHistory') || []);
+    const entry = history.find(h => h.url === normalizedUrl);
+    if (entry && name) entry.name = name;
+    store.set('serverHistory', history);
   });
 
   // ── External links ────────────────────────────────────
