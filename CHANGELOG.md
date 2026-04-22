@@ -1,5 +1,16 @@
 # Haven Desktop Changelog
 
+## v1.4.0
+
+### Added
+- **Background server view preloading** — secondary servers are preloaded in the background so switching between them is nearly instant. (#5269)
+- **Server history sync to web client** — Desktop's known server list is now shared with the Haven web client on startup, so servers you've used in the app appear without re-entering the URL.
+
+### Fixed
+- **Server history cleanup** — server history entries are now deduplicated, validated, and legacy/malformed entries are cleaned up on read.
+
+---
+
 ## v1.3.0
 
 ### Added
