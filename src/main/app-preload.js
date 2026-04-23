@@ -1196,6 +1196,13 @@ window.havenDesktop = {
 
   /** Query per-server unread badge state for notification dots */
   getServerBadges: () => ipcRenderer.invoke('get-server-badges'),
+
+  /** Report which server URLs this view can actually display in its sidebar.
+   *  Main filters the taskbar overlay so it only counts unreads from
+   *  servers at least one open view can surface — preventing phantom
+   *  badges from background-preloaded servers the user never added on
+   *  the active origin. (#5269) */
+  reportKnownServerUrls: (urls) => ipcRenderer.send('report-known-server-urls', urls),
 };
 
 console.log('[Haven Desktop] App preload ready — per-app audio & enhanced features active');

@@ -99,6 +99,11 @@ let activeServerUrl = null;
 let primaryServerUrl = null;       // the server the user actually chose to connect to
 let badgeIcon       = null;
 let serverBadgeState = new Map();  // serverUrl → boolean (true = has unreads)
+// senderUrl → Set<normalizedUrl> of servers that view's sidebar can display.
+// Used to filter the taskbar overlay so a background BrowserView with
+// unreads doesn't light the badge when no open view has a visible icon
+// for that server (orphan / phantom badge). (#5269)
+let knownServerUrlsByView = new Map();
 let _logBuf = '', _logTimer = null;  // server log batch buffer (module-scope so crash handler can clear)
 
 function normalizeServerUrl(serverUrl) {
@@ -327,6 +332,7 @@ function resetToWelcome(clearPrefs = false) {
   }
   serverViews.clear();
   serverBadgeState.clear();
+  knownServerUrlsByView.clear();
   activeServerUrl = null;
   primaryServerUrl = null;
   if (clearPrefs) {
@@ -414,6 +420,7 @@ function createAppWindow(serverUrl) {
     mainWindow.on('closed', () => {
       serverViews.clear();
       serverBadgeState.clear();
+      knownServerUrlsByView.clear();
       activeServerUrl = null;
       primaryServerUrl = null;
       mainWindow = null;
@@ -546,6 +553,8 @@ function ensureServerView(serverUrl, { background = false } = {}) {
             try { view.webContents.destroy(); } catch {}
             serverViews.delete(url);
             serverBadgeState.delete(url);
+            knownServerUrlsByView.delete(url);
+            recomputeTaskbarBadge();
             switchToServer(primaryServerUrl);
           } else {
             resetToWelcome(true);
@@ -572,6 +581,8 @@ function ensureServerView(serverUrl, { background = false } = {}) {
             try { view.webContents.destroy(); } catch {}
             serverViews.delete(url);
             serverBadgeState.delete(url);
+            knownServerUrlsByView.delete(url);
+            recomputeTaskbarBadge();
             switchToServer(primaryServerUrl);
           } else {
             resetToWelcome();
@@ -590,6 +601,8 @@ function ensureServerView(serverUrl, { background = false } = {}) {
         try { view.webContents.destroy(); } catch {}
         serverViews.delete(url);
         serverBadgeState.delete(url);
+        knownServerUrlsByView.delete(url);
+        recomputeTaskbarBadge();
         if (primaryServerUrl && serverViews.has(primaryServerUrl)) {
           switchToServer(primaryServerUrl);
           const wc = serverViews.get(primaryServerUrl)?.webContents;
@@ -1007,6 +1020,35 @@ function clearNotificationBadge() {
   mainWindow.flashFrame(false);
 }
 
+// Compute and apply the taskbar overlay badge based on serverBadgeState,
+// filtered so a server's unreads only count if at least one open view's
+// sidebar can display that server (its own origin counts). Without this
+// filter, background-preloaded BrowserViews fire the badge for servers
+// the user has no visible icon for, producing a "phantom" taskbar badge
+// with no in-app indicator anywhere. (#5269)
+function recomputeTaskbarBadge() {
+  // Union of every open view's known URL set (each view contributes its
+  // own origin + every remote icon it currently shows). A badge counts
+  // only if its server URL is in this union.
+  const visible = new Set();
+  for (const set of knownServerUrlsByView.values()) {
+    for (const u of set) visible.add(u);
+  }
+  let anyVisibleUnread = false;
+  for (const [url, hasUnread] of serverBadgeState) {
+    if (!hasUnread) continue;
+    // If no view has reported its known URLs yet (early startup before
+    // any renderer has finished its first sidebar render), fall back to
+    // the legacy behaviour so the badge still works.
+    if (knownServerUrlsByView.size === 0 || visible.has(url)) {
+      anyVisibleUnread = true;
+      break;
+    }
+  }
+  if (anyVisibleUnread) setNotificationBadge();
+  else clearNotificationBadge();
+}
+
 // ═══════════════════════════════════════════════════════════
 // System Tray
 // ═══════════════════════════════════════════════════════════
@@ -1051,6 +1093,8 @@ function createTray() {
               try { secondaryView.webContents.destroy(); } catch {}
               serverViews.delete(secondaryUrl);
               serverBadgeState.delete(secondaryUrl);
+              knownServerUrlsByView.delete(secondaryUrl);
+              recomputeTaskbarBadge();
             }
             switchToServer(primaryServerUrl);
           } else {
@@ -1285,10 +1329,7 @@ function registerIPC() {
     }
     if (senderUrl) serverBadgeState.set(senderUrl, !!hasUnread);
 
-    // Show badge if ANY server has unreads; clear only when ALL are read
-    const anyUnread = [...serverBadgeState.values()].some(v => v);
-    if (anyUnread) setNotificationBadge();
-    else clearNotificationBadge();
+    recomputeTaskbarBadge();
 
     // Notify the active BrowserView so it can show notification dots on server icons
     const active = getActiveContents();
@@ -1296,6 +1337,24 @@ function registerIPC() {
       const badgeMap = Object.fromEntries(serverBadgeState);
       safeSend(active, 'server-badge-update', badgeMap);
     }
+  });
+
+  // ── Renderer reports which server URLs its sidebar can display ──
+  // Used by recomputeTaskbarBadge to skip phantom unreads from background
+  // servers the user has no visible icon for. (#5269)
+  ipcMain.on('report-known-server-urls', (e, urls) => {
+    let senderUrl = null;
+    for (const [url, view] of serverViews) {
+      if (view.webContents === e.sender) { senderUrl = url; break; }
+    }
+    if (!senderUrl) return;
+    const set = new Set();
+    for (const u of (urls || [])) {
+      const n = normalizeServerUrl(u);
+      if (n) set.add(n);
+    }
+    knownServerUrlsByView.set(senderUrl, set);
+    recomputeTaskbarBadge();
   });
 
   // ── Query per-server badge state (renderer asks for current state) ──
@@ -1428,6 +1487,7 @@ function registerIPC() {
       }
       serverViews.clear();
       serverBadgeState.clear();
+      knownServerUrlsByView.clear();
       primaryServerUrl = newUrl;
       activeServerUrl = null;
       store.set('userPrefs.serverUrl', newUrl);
