@@ -580,6 +580,7 @@ let _audioCtx            = null;
 let _audioDestination    = null;
 let _capturedAudioPid    = null;
 let _audioBufferQueue    = [];
+let _audioPacketsReceived = 0;
 // ─── Global voice shortcut triggers ──────────────────────
 ipcRenderer.on('voice:mute-toggle',   () => document.getElementById('voice-mute-btn')?.click());
 ipcRenderer.on('voice:deafen-toggle', () => document.getElementById('voice-deafen-btn')?.click());
@@ -636,6 +637,7 @@ ipcRenderer.on('audio:capture-data', (_event, pcmData) => {
   } else {
     _audioBufferQueue.push(samples);
   }
+  _audioPacketsReceived++;
 });
 
 // ─── Listen for screen-picker request from main process ──
@@ -1032,6 +1034,7 @@ function teardownAudioPipeline() {
   _audioDestination = null;
   _capturedAudioPid = null;
   _audioBufferQueue = [];
+  _audioPacketsReceived = 0;
   _ipcDataCount     = 0;
   window._havenAppAudioTrack  = null;
   window._havenAppAudioStream = null;
@@ -1064,10 +1067,26 @@ function installGetDisplayMediaOverride() {
   navigator.mediaDevices.getDisplayMedia = async function (constraints) {
     const stream = await _origGDM(constraints);
 
-    // If per-app audio capture is active, add our native capture track
-    // (system loopback is already excluded by the main process handler)
-    if (window._havenAppAudioTrack) {
-      // Remove any existing audio tracks (shouldn't be any, but just in case)
+    // If per-app audio was selected, only replace loopback once the native
+    // capture path proves alive (at least one packet delivered). This avoids
+    // silent shares if native capture initializes but never produces PCM.
+    if (_capturedAudioPid && window._havenAppAudioTrack) {
+      const timeoutMs = 1200;
+      const stepMs = 25;
+      const start = Date.now();
+      while (_audioPacketsReceived < 1 && (Date.now() - start) < timeoutMs) {
+        await new Promise(resolve => setTimeout(resolve, stepMs));
+      }
+
+      if (_audioPacketsReceived > 0) {
+        stream.getAudioTracks().forEach(t => { stream.removeTrack(t); t.stop(); });
+        stream.addTrack(window._havenAppAudioTrack);
+        console.log('[Haven Desktop] Added per-app audio track to screen share');
+      } else {
+        console.warn('[Haven Desktop] Per-app capture not ready; keeping system loopback audio for this share');
+      }
+    } else if (window._havenAppAudioTrack) {
+      // Defensive fallback for any path that sets a track without a selected PID.
       stream.getAudioTracks().forEach(t => { stream.removeTrack(t); t.stop(); });
       stream.addTrack(window._havenAppAudioTrack);
       console.log('[Haven Desktop] Added per-app audio track to screen share');

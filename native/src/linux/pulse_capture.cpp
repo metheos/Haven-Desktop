@@ -333,7 +333,12 @@ void PulseCapture::captureLoop() {
     // (the old approach) and use a loopback for monitoring.
     //
     if (isPipeWire && !origSinkLookup.name.empty()) {
-        // Create a combine-sink: original output + HavenCapture
+        // PipeWire path: Try module-combine-sink to keep the app's original
+        // output alive while teeing audio to our capture sink.
+        // If combine-sink fails (some PipeWire versions have incomplete
+        // support), fall back to a loopback from the original sink's monitor.
+        bool combineSinkOk = false;
+
         std::string combineArgs = "sink_name=HavenCombined "
             "sink_properties=device.description=\"Haven\\ Combined\\ Capture\" "
             "slaves=" + origSinkLookup.name + ",HavenCapture";
@@ -343,27 +348,49 @@ void PulseCapture::captureLoop() {
             combineArgs.c_str(), moduleLoadCb, &combRes);
         if (op) { while (!combRes.done) pa.iterateBlock(); pa_operation_unref(op); }
 
-        // m_loopbackModule repurposed to store the combine-sink module ID
-        m_loopbackModule = combRes.index;
+        if (combRes.index != PA_INVALID_INDEX) {
+            m_loopbackModule = combRes.index;
 
-        // Look up HavenCombined sink index
-        SinkLookup csl;
-        auto combineSinkCb = [](pa_context*, const pa_sink_info* info, int eol, void* ud) {
-            auto* s = (SinkLookup*)ud;
-            if (eol > 0 || !info) { s->done = true; return; }
-            if (info->name && std::string(info->name) == "HavenCombined") {
-                s->idx = info->index;
+            // Look up HavenCombined sink index
+            SinkLookup csl;
+            auto combineSinkCb = [](pa_context*, const pa_sink_info* info, int eol, void* ud) {
+                auto* s = (SinkLookup*)ud;
+                if (eol > 0 || !info) { s->done = true; return; }
+                if (info->name && std::string(info->name) == "HavenCombined") {
+                    s->idx = info->index;
+                }
+            };
+            op = pa_context_get_sink_info_by_name(pa.ctx, "HavenCombined", combineSinkCb, &csl);
+            if (op) { while (!csl.done) pa.iterateBlock(); pa_operation_unref(op); }
+
+            if (csl.idx != PA_INVALID_INDEX) {
+                // Small delay to let PipeWire finish setting up the combined sink
+                usleep(150000);
+                OpDone od;
+                op = pa_context_move_sink_input_by_index(pa.ctx, targetSinkInput, csl.idx, successCb, &od);
+                if (op) { while (!od.done) pa.iterateBlock(); pa_operation_unref(op); }
+                combineSinkOk = true;
             }
-        };
-        op = pa_context_get_sink_info_by_name(pa.ctx, "HavenCombined", combineSinkCb, &csl);
-        if (op) { while (!csl.done) pa.iterateBlock(); pa_operation_unref(op); }
+        }
 
-        if (csl.idx != PA_INVALID_INDEX) {
-            // Small delay to let PipeWire finish setting up the combined sink
-            usleep(150000);
-            OpDone od;
-            op = pa_context_move_sink_input_by_index(pa.ctx, targetSinkInput, csl.idx, successCb, &od);
-            if (op) { while (!od.done) pa.iterateBlock(); pa_operation_unref(op); }
+        if (!combineSinkOk) {
+            // Combine-sink failed — fall back to loopback from original sink's
+            // monitor.  This captures ALL audio on that output device (not just
+            // the target app), but it won't crash.
+            fprintf(stderr, "[Haven AudioCapture] combine-sink unavailable on PipeWire — falling back to loopback\n");
+            // Clean up failed combine-sink module if it was partially loaded
+            if (m_loopbackModule != 0) {
+                OpDone od2;
+                auto* unOp = pa_context_unload_module(pa.ctx, m_loopbackModule, successCb, &od2);
+                if (unOp) { while (!od2.done) pa.iterateBlock(); pa_operation_unref(unOp); }
+                m_loopbackModule = 0;
+            }
+            // Loopback from original sink's monitor → HavenCapture
+            ModuleLoadResult lbRes;
+            std::string args = "source=" + origSinkLookup.name + ".monitor sink=HavenCapture sink_dont_move=true";
+            op = pa_context_load_module(pa.ctx, "module-loopback", args.c_str(), moduleLoadCb, &lbRes);
+            if (op) { while (!lbRes.done) pa.iterateBlock(); pa_operation_unref(op); }
+            m_loopbackModule = lbRes.index;
         }
     } else {
         // Classic PulseAudio: move sink input to null sink directly

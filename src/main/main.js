@@ -1196,11 +1196,13 @@ function registerScreenShareHandler() {
         }
       }
 
-      // Per-app audio: stream from native addon only (no loopback).
       // No audio: user explicitly chose silence.
       // System audio: use loopback (default).
+      // Per-app audio: also request loopback initially; renderer swaps in the
+      // per-app track once native PCM is confirmed alive. This avoids a silent
+      // stream if native per-app capture initializes but fails to deliver data.
       if (usePerAppAudio) {
-        callback({ video: selected });
+        callback({ video: selected, audio: 'loopback' });
       } else if (result.audioAppPid === 'none') {
         callback({ video: selected });
       } else {

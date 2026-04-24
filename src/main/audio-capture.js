@@ -74,10 +74,25 @@ class AudioCaptureManager {
 
     this._callback  = cb;
     this._capturing = true;
+    this._lastDataAt = Date.now();
 
     try {
-      this._addon.startCapture(pid, (pcm) => { if (this._callback) this._callback(pcm); });
+      this._addon.startCapture(pid, (pcm) => {
+        this._lastDataAt = Date.now();
+        if (this._callback) this._callback(pcm);
+      });
       console.log(`[AudioCapture] Capturing PID ${pid}`);
+
+      // Watchdog: if no data arrives for 8 seconds after start, the native
+      // capture thread likely crashed or failed silently.  Stop gracefully
+      // instead of leaving the capture in a broken state.
+      this._watchdog = setTimeout(() => {
+        if (this._capturing && Date.now() - this._lastDataAt > 7000) {
+          console.warn('[AudioCapture] No data received — stopping capture (native thread may have failed)');
+          this.stopCapture();
+        }
+      }, 8000);
+
       return true;
     } catch (e) {
       this._capturing = false;
@@ -88,6 +103,7 @@ class AudioCaptureManager {
 
   /** Stop active capture. */
   stopCapture() {
+    clearTimeout(this._watchdog);
     if (this._addon && this._capturing) {
       try { this._addon.stopCapture(); } catch { /* */ }
     }

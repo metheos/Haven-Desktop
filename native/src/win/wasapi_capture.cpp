@@ -405,12 +405,15 @@ void WasapiCapture::captureLoop() {
             hr = capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr);
             if (FAILED(hr)) break;
 
-            if (!(flags & AUDCLNT_BUFFERFLAGS_SILENT) && data && frames > 0) {
+            if (frames > 0) {
                 const float* fdata = reinterpret_cast<const float*>(data);
                 monoBuffer.clear();
 
-                // Mix N-channel → mono, adapting to the actual capture format
-                if (captureIsFloat && captureBitsPerSample == 32) {
+                if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) || !data) {
+                    // Explicitly propagate silence so the renderer can treat
+                    // the capture path as alive even when the source app is quiet.
+                    monoBuffer.resize(frames, 0.0f);
+                } else if (captureIsFloat && captureBitsPerSample == 32) {
                     // Float32 — sum all channels and divide
                     for (UINT32 f = 0; f < frames; f++) {
                         float sum = 0.0f;
