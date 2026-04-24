@@ -1,5 +1,12 @@
 # Haven Desktop Changelog
 
+## v1.4.1
+
+### Fixed
+- **Taskbar badge filtered to visible servers** — the taskbar badge now only lights up for servers whose unread indicators are actually visible in at least one open server view. Previously, background-preloaded views could trigger the badge for servers that had no icon in any sidebar, making the badge appear with nothing to point to.
+
+---
+
 ## v1.4.0
 
 ### Added
