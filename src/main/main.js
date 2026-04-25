@@ -527,6 +527,9 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     });
 
     // ── Page load timeout — if no content after 15 s, offer to go back ──
+    // Background-preloaded views are silent: they never show user dialogs.
+    // If they fail to load, they're cleaned up quietly so unread-badge
+    // pre-loading doesn't surface as a scary popup on launch.
     let loadResolved = false;
     view.webContents.once('did-finish-load', async () => {
       loadResolved = true;
@@ -537,7 +540,18 @@ function ensureServerView(serverUrl, { background = false } = {}) {
       const isHaven = await view.webContents.executeJavaScript(
         '!!(document.getElementById("app-body") || document.querySelector(".auth-page") || document.title.startsWith("Haven"))'
       ).catch(() => false);
-      if (!isHaven && mainWindow && !mainWindow.isDestroyed()) {
+      if (isHaven || !mainWindow || mainWindow.isDestroyed()) return;
+      if (background) {
+        // Silent cleanup — don't bother the user about a background preload
+        mainWindow?.removeBrowserView(view);
+        try { view.webContents.destroy(); } catch {}
+        serverViews.delete(url);
+        serverBadgeState.delete(url);
+        knownServerUrlsByView.delete(url);
+        recomputeTaskbarBadge();
+        return;
+      }
+      {
         const isSecondary = primaryServerUrl && url !== primaryServerUrl;
         const { response } = await dialog.showMessageBox(mainWindow, {
           type: 'warning',
@@ -567,6 +581,16 @@ function ensureServerView(serverUrl, { background = false } = {}) {
       // Check if the page actually has content (async — never blocks renderer or main)
       view.webContents.executeJavaScript('document.body?.innerText?.length || 0').then(async (len) => {
         if (len > 20) return; // Page has content, it's fine
+        if (background) {
+          // Background preload silently failed to load \u2014 just clean up
+          mainWindow?.removeBrowserView(view);
+          try { view.webContents.destroy(); } catch {}
+          serverViews.delete(url);
+          serverBadgeState.delete(url);
+          knownServerUrlsByView.delete(url);
+          recomputeTaskbarBadge();
+          return;
+        }
         const isSecondary = primaryServerUrl && url !== primaryServerUrl;
         const { response } = await dialog.showMessageBox(mainWindow, {
           type: 'warning',
