@@ -1,5 +1,12 @@
 # Haven Desktop Changelog
 
+## v1.4.3
+
+### Fixed
+- **"Haven Not Found" / "Connection Problem" popups would trap the app forever if the user wasn't there to click a button.** Both load-failure dialogs now auto-dismiss after 30 seconds and quietly perform the default action (return to welcome, or switch back to your primary server). The popup message now mentions the auto-return so it's not surprising. The native dialog stays on screen until the user closes it; the underlying view has already been cleaned up by then so the buttons are effectively no-ops.
+
+---
+
 ## v1.4.2
 
 ### Fixed

@@ -319,6 +319,27 @@ function registerVoiceShortcuts() {
   bind(cfg.ptt,    'voice:ptt-toggle');
 }
 
+// ── Show a dialog with an auto-timeout ─────────────────
+// Wraps `dialog.showMessageBox` so an unanswered "server unreachable"
+// popup doesn't trap the app forever. After `timeoutMs` we resolve as
+// if the user picked the default (destructive) button. The original
+// dialog stays on screen until the user dismisses it; the post-dialog
+// code path uses the `.timedOut` flag to avoid double-acting on a
+// late user response.
+async function showDialogWithTimeout(parent, options, timeoutMs = 30000) {
+  let timer = null;
+  const timeoutPromise = new Promise((resolve) => {
+    timer = setTimeout(() => {
+      resolve({ response: options.defaultId || 0, timedOut: true });
+    }, timeoutMs);
+  });
+  const dialogPromise = dialog.showMessageBox(parent, options).then((res) => {
+    if (timer) { clearTimeout(timer); timer = null; }
+    return res;
+  });
+  return Promise.race([timeoutPromise, dialogPromise]);
+}
+
 // ── Reset to welcome screen ─────────────────────────────
 // clearPrefs=true only when the user explicitly requests a full reset
 // (Ctrl+Shift+Home). Automatic failures (load errors, etc.) use the default
@@ -553,13 +574,14 @@ function ensureServerView(serverUrl, { background = false } = {}) {
       }
       {
         const isSecondary = primaryServerUrl && url !== primaryServerUrl;
-        const { response } = await dialog.showMessageBox(mainWindow, {
+        const { response, timedOut } = await showDialogWithTimeout(mainWindow, {
           type: 'warning',
           buttons: [isSecondary ? 'Go Back to My Server' : 'Change Server', 'Keep Loading'],
           defaultId: 0,
           title: 'Haven Not Found',
-          message: `The page at ${url} doesn't look like a Haven server.\n\nThis can happen if the server moved to a new address or the URL is wrong.`,
+          message: `The page at ${url} doesn't look like a Haven server.\n\nThis can happen if the server moved to a new address or the URL is wrong. Auto-returns home in 30 seconds.`,
         });
+        if (timedOut) console.warn('[main] "Haven Not Found" dialog timed out, returning home');
         if (response === 0) {
           if (isSecondary) {
             // Clean up the failed secondary view and return to primary
@@ -592,13 +614,14 @@ function ensureServerView(serverUrl, { background = false } = {}) {
           return;
         }
         const isSecondary = primaryServerUrl && url !== primaryServerUrl;
-        const { response } = await dialog.showMessageBox(mainWindow, {
+        const { response, timedOut } = await showDialogWithTimeout(mainWindow, {
           type: 'warning',
           buttons: [isSecondary ? 'Go Back to My Server' : 'Go Back to Welcome', 'Keep Waiting'],
           defaultId: 0,
           title: 'Connection Problem',
-          message: `Haven couldn't load the server at ${url}.\n\nThis could mean the server is down, the address is wrong, or there's a network issue.`,
+          message: `Haven couldn't load the server at ${url}.\n\nThis could mean the server is down, the address is wrong, or there's a network issue. Auto-returns home in 30 seconds.`,
         });
+        if (timedOut) console.warn('[main] "Connection Problem" dialog timed out, returning home');
         if (response === 0) {
           if (isSecondary) {
             mainWindow?.removeBrowserView(view);
