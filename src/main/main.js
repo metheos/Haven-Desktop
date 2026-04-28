@@ -1494,20 +1494,37 @@ function registerIPC() {
   // Tracks per-server unread state so one server clearing its badge doesn't
   // accidentally clear another server's unreads.
   ipcMain.on('notification-badge', (e, hasUnread) => {
-    // Identify which server sent this signal by matching the sender's webContents
+    // Identify which server sent this signal by matching the sender's
+    // webContents.  Fall back to URL matching in case the webContents
+    // identity changed (e.g. after a renderer reload) — without this
+    // fallback a background server's notifications go unrecorded and the
+    // sidebar dot for that server never lights up on any other open view.
     let senderUrl = null;
     for (const [url, view] of serverViews) {
       if (view.webContents === e.sender) { senderUrl = url; break; }
+    }
+    if (!senderUrl) {
+      try {
+        const senderRaw = e.sender.getURL();
+        const senderNorm = normalizeServerUrl(senderRaw);
+        if (senderNorm) {
+          for (const [url] of serverViews) {
+            if (normalizeServerUrl(url) === senderNorm) { senderUrl = url; break; }
+          }
+        }
+      } catch {}
     }
     if (senderUrl) serverBadgeState.set(senderUrl, !!hasUnread);
 
     recomputeTaskbarBadge();
 
-    // Notify the active BrowserView so it can show notification dots on server icons
-    const active = getActiveContents();
-    if (active && active !== e.sender) {
-      const badgeMap = Object.fromEntries(serverBadgeState);
-      safeSend(active, 'server-badge-update', badgeMap);
+    // Broadcast the latest map to EVERY open view (not just the active one).
+    // Background views still render their server bars and need to update
+    // their dots too — and the active view filter previously dropped the
+    // signal whenever the sender happened to be the active view.
+    const badgeMap = Object.fromEntries(serverBadgeState);
+    for (const [, view] of serverViews) {
+      try { safeSend(view.webContents, 'server-badge-update', badgeMap); } catch {}
     }
   });
 
@@ -1518,6 +1535,17 @@ function registerIPC() {
     let senderUrl = null;
     for (const [url, view] of serverViews) {
       if (view.webContents === e.sender) { senderUrl = url; break; }
+    }
+    if (!senderUrl) {
+      try {
+        const senderRaw = e.sender.getURL();
+        const senderNorm = normalizeServerUrl(senderRaw);
+        if (senderNorm) {
+          for (const [url] of serverViews) {
+            if (normalizeServerUrl(url) === senderNorm) { senderUrl = url; break; }
+          }
+        }
+      } catch {}
     }
     if (!senderUrl) return;
     const set = new Set();

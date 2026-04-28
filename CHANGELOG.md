@@ -1,5 +1,13 @@
 # Haven Desktop Changelog
 
+## v1.4.4
+
+### Fixed
+- **Per-app screen-share audio fell back to silence** when WASAPI process-loopback couldn't bind to the chosen PID (game running elevated, transient PID, etc.).  We now chain per-app capture → system-minus-Haven (clean system audio that excludes our own voice) → Electron raw loopback as a final last-resort, so the user *always* gets some audio.  A small coloured badge in the share viewer now tells the streamer which mode they ended up in (green = per-app, blue = clean system, orange = fallback to clean system, red = Electron loopback / may include voice).
+- **Server-icon notification dots not appearing for messages from a different/background server** — the `notification-badge` IPC used strict `webContents` identity to figure out which server fired it, so a renderer reload (transient navigation, crash recovery) silently broke the lookup and no other open view ever lit up that server's dot.  Sender lookup now falls back to URL-match via `e.sender.getURL()`, and the per-server map is broadcast to **every** open BrowserView (not just the active one), so every sidebar updates its dots in real time.  The same fallback applies to `report-known-server-urls` so background views' filter sets survive reloads.
+
+---
+
 ## v1.4.3
 
 ### Fixed
