@@ -36,6 +36,7 @@
 #include <string>
 #include <cstring>
 #include <algorithm>
+#include <chrono>
 
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "mmdevapi.lib")
@@ -72,12 +73,16 @@ static std::string ProcessNameFromPid(DWORD pid) {
 }
 
 // ── Completion handler for ActivateAudioInterfaceAsync ────
-class ActivateHandler : public IActivateAudioInterfaceCompletionHandler {
+class ActivateHandler : public IActivateAudioInterfaceCompletionHandler, public IAgileObject {
 public:
-    ActivateHandler() : m_refCount(1), m_hr(E_FAIL), m_client(nullptr) {
+    ActivateHandler() : m_refCount(1), m_hr(E_FAIL), m_client(nullptr), m_ftm(nullptr) {
         m_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        CoCreateFreeThreadedMarshaler(static_cast<IUnknown*>(static_cast<IActivateAudioInterfaceCompletionHandler*>(this)), &m_ftm);
     }
-    ~ActivateHandler() { CloseHandle(m_event); }
+    ~ActivateHandler() {
+        if (m_ftm) m_ftm->Release();
+        CloseHandle(m_event);
+    }
 
     // IUnknown
     ULONG STDMETHODCALLTYPE AddRef()  override { return InterlockedIncrement(&m_refCount); }
@@ -91,6 +96,14 @@ public:
             *ppv = static_cast<IActivateAudioInterfaceCompletionHandler*>(this);
             AddRef();
             return S_OK;
+        }
+        if (riid == __uuidof(IAgileObject)) {
+            *ppv = static_cast<IAgileObject*>(this);
+            AddRef();
+            return S_OK;
+        }
+        if (riid == __uuidof(IMarshal) && m_ftm) {
+            return m_ftm->QueryInterface(riid, ppv);
         }
         *ppv = nullptr;
         return E_NOINTERFACE;
@@ -123,6 +136,7 @@ private:
     ULONG         m_refCount;
     HRESULT       m_hr;
     IAudioClient* m_client;
+    IUnknown*     m_ftm;
     HANDLE        m_event;
 };
 
@@ -282,7 +296,12 @@ bool WasapiCapture::StartCapture(uint32_t pid, CaptureMode mode,
         m_mode           = mode;
         m_callback       = dataCb;
         m_statusCallback = statusCb;
-        m_initOk         = false;
+    }
+
+    {
+        std::lock_guard<std::mutex> startLock(m_startMutex);
+        m_startState = StartupState::Starting;
+        m_startHr = E_PENDING;
     }
 
     // Pre-flight: verify PID is valid and accessible.
@@ -298,13 +317,6 @@ bool WasapiCapture::StartCapture(uint32_t pid, CaptureMode mode,
         CloseHandle(h);
     }
 
-    if (m_initEvent) { CloseHandle(m_initEvent); m_initEvent = nullptr; }
-    m_initEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    if (!m_initEvent) {
-        emitStatus(CaptureStatusKind::Failed, "CreateEvent failed", GetLastError());
-        return false;
-    }
-
     emitStatus(CaptureStatusKind::Starting,
         std::string("activating ") +
         (mode == CaptureMode::ExcludeProcess ? "EXCLUDE-mode" : "INCLUDE-mode") +
@@ -313,18 +325,19 @@ bool WasapiCapture::StartCapture(uint32_t pid, CaptureMode mode,
     m_running = true;
     m_thread = std::thread([this]() { captureLoop(); });
 
-    // Wait up to 4 seconds for the thread to signal init complete.
-    DWORD waitResult = WaitForSingleObject(m_initEvent, 4000);
-    if (waitResult != WAIT_OBJECT_0 || !m_initOk.load()) {
-        // Init didn't complete in time, or completed with failure.
-        // The capture thread may still be retrying — stop it cleanly.
-        if (waitResult != WAIT_OBJECT_0) {
+    std::unique_lock<std::mutex> startLock(m_startMutex);
+    bool signaled = m_startCv.wait_for(startLock, std::chrono::milliseconds(12000), [this]() {
+        return m_startState != StartupState::Starting;
+    });
+
+    if (!signaled || m_startState == StartupState::Failed) {
+        if (!signaled) {
             emitStatus(CaptureStatusKind::Failed,
-                "WASAPI activation timed out (>4s)", 0);
+                "WASAPI activation timed out (>12s)", 0);
         }
         m_running = false;
+        startLock.unlock();
         if (m_thread.joinable()) m_thread.join();
-        CloseHandle(m_initEvent); m_initEvent = nullptr;
         return false;
     }
 
@@ -339,7 +352,11 @@ void WasapiCapture::StopCapture() {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_callback = nullptr;
     }
-    if (m_initEvent) { CloseHandle(m_initEvent); m_initEvent = nullptr; }
+    {
+        std::lock_guard<std::mutex> startLock(m_startMutex);
+        m_startState = StartupState::Idle;
+        m_startHr = S_OK;
+    }
     if (wasRunning) {
         emitStatus(CaptureStatusKind::Stopped, "capture stopped");
     }
@@ -352,14 +369,20 @@ void WasapiCapture::StopCapture() {
 void WasapiCapture::Cleanup() { StopCapture(); }
 
 // ── Capture Loop ───────────────────────────────────────────
-// Activation runs on this thread, but we signal m_initEvent as
-// soon as init succeeds OR hard-fails so StartCapture can return
-// synchronously with an accurate result. After init: just the
-// read loop runs here.
+// Activation runs on this thread. We signal startup state via
+// m_startCv as soon as init succeeds OR hard-fails so StartCapture
+// can return synchronously with an accurate result. After init:
+// just the read loop runs here.
 void WasapiCapture::captureLoop() {
-    auto signalInit = [&](bool ok) {
-        m_initOk = ok;
-        if (m_initEvent) SetEvent((HANDLE)m_initEvent);
+    auto failStart = [this](HRESULT hr, const std::string& msg) {
+        emitStatus(CaptureStatusKind::Failed, msg, hr);
+        {
+            std::lock_guard<std::mutex> startLock(m_startMutex);
+            m_startState = StartupState::Failed;
+            m_startHr = hr;
+        }
+        m_startCv.notify_all();
+        m_running = false;
     };
 
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -391,13 +414,10 @@ void WasapiCapture::captureLoop() {
     );
 
     if (FAILED(hr)) {
-        emitStatus(CaptureStatusKind::Failed,
-            "ActivateAudioInterfaceAsync returned failure (process loopback API may be unavailable)",
-            hr);
+        failStart(hr,
+            "ActivateAudioInterfaceAsync returned failure (process loopback API may be unavailable)");
         handler->Release();
         CoUninitialize();
-        m_running = false;
-        signalInit(false);
         return;
     }
 
@@ -407,14 +427,11 @@ void WasapiCapture::captureLoop() {
     handler->Release();
 
     if (FAILED(hr) || !client) {
-        emitStatus(CaptureStatusKind::Failed,
+        failStart(FAILED(hr) ? hr : E_FAIL,
             (hr == E_ACCESSDENIED)
                 ? "Process loopback denied (target may be a protected/UWP process)"
-                : "ActivateCompleted reported failure",
-            hr);
+                : "ActivateCompleted reported failure");
         CoUninitialize();
-        m_running = false;
-        signalInit(false);
         return;
     }
 
@@ -470,22 +487,17 @@ void WasapiCapture::captureLoop() {
             );
             CoTaskMemFree(mixFmt);
             if (FAILED(hr2)) {
-                emitStatus(CaptureStatusKind::Failed,
-                    "IAudioClient::Initialize failed for both preferred and mix formats",
-                    hr2);
+                failStart(hr2,
+                    "IAudioClient::Initialize failed for both preferred and mix formats");
                 client->Release();
                 CoUninitialize();
-                m_running = false;
-                signalInit(false);
                 return;
             }
         } else {
-            emitStatus(CaptureStatusKind::Failed,
-                "Initialize failed and GetMixFormat returned no format", hr);
+            failStart(hr,
+                "Initialize failed and GetMixFormat returned no format");
             client->Release();
             CoUninitialize();
-            m_running = false;
-            signalInit(false);
             return;
         }
     }
@@ -494,25 +506,28 @@ void WasapiCapture::captureLoop() {
     IAudioCaptureClient* capture = nullptr;
     hr = client->GetService(__uuidof(IAudioCaptureClient), (void**)&capture);
     if (FAILED(hr)) {
-        emitStatus(CaptureStatusKind::Failed,
-            "GetService(IAudioCaptureClient) failed", hr);
+        failStart(hr,
+            "GetService(IAudioCaptureClient) failed");
         client->Release();
         CoUninitialize();
-        m_running = false;
-        signalInit(false);
         return;
     }
 
     hr = client->Start();
     if (FAILED(hr)) {
-        emitStatus(CaptureStatusKind::Failed, "IAudioClient::Start failed", hr);
+        failStart(hr, "IAudioClient::Start failed");
         capture->Release();
         client->Release();
         CoUninitialize();
-        m_running = false;
-        signalInit(false);
         return;
     }
+
+    {
+        std::lock_guard<std::mutex> startLock(m_startMutex);
+        m_startState = StartupState::Running;
+        m_startHr = S_OK;
+    }
+    m_startCv.notify_all();
 
     // Init succeeded — let StartCapture return true.
     {
@@ -524,7 +539,6 @@ void WasapiCapture::captureLoop() {
         OutputDebugStringA(dbg);
     }
     emitStatus(CaptureStatusKind::Started, "WASAPI process loopback active");
-    signalInit(true);
 
     // Emit one immediate silence packet so the renderer's "first packet
     // arrived" gate flips right away, even if the source app is silent.

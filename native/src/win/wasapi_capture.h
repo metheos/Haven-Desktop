@@ -19,6 +19,7 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <condition_variable>
 
 namespace haven {
 
@@ -37,6 +38,13 @@ public:
     void                  Cleanup()                    override;
 
 private:
+    enum class StartupState {
+        Idle,
+        Starting,
+        Running,
+        Failed
+    };
+
     void captureLoop();
     void emitStatus(CaptureStatusKind kind, const std::string& msg, int64_t code = 0);
 
@@ -48,11 +56,10 @@ private:
     CaptureMode       m_mode = CaptureMode::IncludeProcess;
     std::mutex        m_mutex;
 
-    // Set by StartCapture before the thread starts; the thread signals
-    // m_initEvent once activation either succeeds or hard-fails so the
-    // caller can return synchronously with an accurate result.
-    void*             m_initEvent = nullptr; // HANDLE
-    std::atomic<bool> m_initOk{false};
+    std::mutex              m_startMutex;
+    std::condition_variable m_startCv;
+    StartupState            m_startState{StartupState::Idle};
+    HRESULT                 m_startHr{S_OK};
 };
 
 } // namespace haven
