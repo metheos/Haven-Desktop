@@ -1,5 +1,12 @@
 # Haven Desktop Changelog
 
+## v1.4.6
+
+### Fixed
+- **Defunct server lockup, take three.** The previous "Haven Not Found" / "Connection Problem" dialogs let the user pick "Keep Loading", which silently kept the retry loop hammering a dead server with no UI to escape — and even a passive close via X / Esc still left the user stranded mid-load.  Both dialogs are gone now: load-content waits drop from 15 s to 5 s, the transient-error retry budget drops from ~30 s to ~1 s, and any failed load just snaps secondary servers back to the primary view (with a toast) or kicks a primary failure to the welcome screen automatically.  The user is never asked to make a choice during a connection failure.
+
+---
+
 ## v1.4.5
 
 ### Fixed

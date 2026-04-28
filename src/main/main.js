@@ -573,35 +573,32 @@ function ensureServerView(serverUrl, { background = false } = {}) {
         return;
       }
       {
+        // No more dialog — the previous "Keep Loading" option just stranded
+        // the user on a non-Haven page while the retry loop hammered a dead
+        // server.  When the page resolves to something that isn't Haven we
+        // just bail immediately, surface a toast on the destination, and
+        // either bounce back to the primary server (if this was a secondary
+        // hop) or to the welcome screen.  Five seconds of trying is plenty
+        // — anything beyond that is the server being broken, not slow.
         const isSecondary = primaryServerUrl && url !== primaryServerUrl;
-        const { response, timedOut } = await showDialogWithTimeout(mainWindow, {
-          type: 'warning',
-          buttons: [isSecondary ? 'Go Back to My Server' : 'Change Server', 'Keep Loading'],
-          defaultId: 0,
-          title: 'Haven Not Found',
-          message: `The page at ${url} doesn't look like a Haven server.\n\nThis can happen if the server moved to a new address or the URL is wrong. Auto-returns home in 30 seconds.`,
-        });
-        if (timedOut) console.warn('[main] "Haven Not Found" dialog timed out, returning home');
-        // Treat ANY answer that isn't an explicit "Keep Loading" (response 1)
-        // as "get me out of here" — including the X / Esc close which used to
-        // leave the user stranded on a non-Haven page with no UI to escape.
-        // For secondary servers, "Keep Loading" alone leaves them on the
-        // failed view; everything else snaps back to the primary so they're
-        // never frozen waiting on an infinite reconnect loop.
-        const wantsOut = response !== 1; // 0 / -1 / undefined / Esc
-        if (wantsOut) {
-          if (isSecondary) {
-            // Clean up the failed secondary view and return to primary
-            mainWindow?.removeBrowserView(view);
-            try { view.webContents.destroy(); } catch {}
-            serverViews.delete(url);
-            serverBadgeState.delete(url);
-            knownServerUrlsByView.delete(url);
-            recomputeTaskbarBadge();
+        if (isSecondary) {
+          mainWindow?.removeBrowserView(view);
+          try { view.webContents.destroy(); } catch {}
+          serverViews.delete(url);
+          serverBadgeState.delete(url);
+          knownServerUrlsByView.delete(url);
+          recomputeTaskbarBadge();
+          if (primaryServerUrl && serverViews.has(primaryServerUrl)) {
             switchToServer(primaryServerUrl);
+            const wc = serverViews.get(primaryServerUrl)?.webContents;
+            if (wc && !wc.isDestroyed()) {
+              wc.executeJavaScript(`if (typeof app !== 'undefined' && typeof app._showToast === 'function') { app._showToast("That server doesn't look like Haven — returned to your server.", 'error'); }`).catch(() => {});
+            }
           } else {
-            resetToWelcome(true);
+            resetToWelcome();
           }
+        } else {
+          resetToWelcome(true);
         }
       }
     });
@@ -650,7 +647,7 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     // Retry briefly on transient errors (server restart, brief outage) before
     // giving up and dumping the user back to the welcome screen.
     let _failRetryCount = 0;
-    const MAX_FAIL_RETRIES = 6; // ~30 s total at 5 s back-off
+    const MAX_FAIL_RETRIES = 1; // ~1 s budget — longer waits stranded users on dead servers
     view.webContents.on('did-fail-load', (_e, errorCode, errorDesc, validatedUrl, isMainFrame) => {
       // Ignore subframe failures (iframes, ads, etc.) — only the main page matters.
       if (isMainFrame === false) return;
