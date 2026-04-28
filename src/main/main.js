@@ -1286,13 +1286,17 @@ function registerScreenShareHandler() {
         }
       }
 
-      // No audio: user explicitly chose silence.
-      // System audio: use loopback (default).
-      // Per-app audio: also request loopback initially; renderer swaps in the
-      // per-app track once native PCM is confirmed alive. This avoids a silent
-      // stream if native per-app capture initializes but fails to deliver data.
+      // Audio routing for the share:
+      //   • Per-app audio: video-only stream from Electron — the renderer
+      //     adds the per-app MediaStreamTrack once native PCM is alive.
+      //     We deliberately do NOT request system loopback here: if the
+      //     native pipeline is slow or fails, the share goes silent rather
+      //     than leaking ALL system audio (which includes Haven's own
+      //     voice output and creates a feedback loop). See issue #5305.
+      //   • "none": user explicitly chose silence.
+      //   • Otherwise (system audio): standard loopback.
       if (usePerAppAudio) {
-        callback({ video: selected, audio: 'loopback' });
+        callback({ video: selected });
       } else if (result.audioAppPid === 'none') {
         callback({ video: selected });
       } else {

@@ -834,6 +834,12 @@ function showScreenPicker(sources, audioApps) {
 // ═══════════════════════════════════════════════════════════
 
 async function buildAudioPipeline() {
+  // Reset arrival counters so the getDisplayMedia override's readiness
+  // check reflects ONLY this capture session, never a stale prior one.
+  _audioPacketsReceived = 0;
+  _ipcDataCount = 0;
+  _audioBufferQueue = [];
+
   // Try AudioWorklet first, fall back to ScriptProcessorNode if it fails
   // (AudioWorklet blob URLs can fail in some Electron/BrowserView contexts)
   try {
@@ -1067,29 +1073,36 @@ function installGetDisplayMediaOverride() {
   navigator.mediaDevices.getDisplayMedia = async function (constraints) {
     const stream = await _origGDM(constraints);
 
-    // If per-app audio was selected, only replace loopback once the native
-    // capture path proves alive (at least one packet delivered). This avoids
-    // silent shares if native capture initializes but never produces PCM.
-    if (_capturedAudioPid && window._havenAppAudioTrack) {
-      const timeoutMs = 1200;
-      const stepMs = 25;
+    // If a per-app PID was selected, the main process returns a video-only
+    // stream (no system loopback). We wait for the native capture path to
+    // produce its first PCM packet, then add the per-app audio track to
+    // the share. If native capture never delivers data we leave the share
+    // silent — we DO NOT fall back to system loopback, which would leak
+    // Haven's own voice output back into the share (issue #5305).
+    if (_capturedAudioPid) {
+      // Strip any audio tracks Electron may have included (defensive — main
+      // process should already be returning video-only for per-app shares).
+      stream.getAudioTracks().forEach(t => { try { stream.removeTrack(t); t.stop(); } catch {} });
+
+      const timeoutMs = 5000;
+      const stepMs = 50;
       const start = Date.now();
       while (_audioPacketsReceived < 1 && (Date.now() - start) < timeoutMs) {
         await new Promise(resolve => setTimeout(resolve, stepMs));
       }
 
-      if (_audioPacketsReceived > 0) {
-        stream.getAudioTracks().forEach(t => { stream.removeTrack(t); t.stop(); });
+      if (_audioPacketsReceived > 0 && window._havenAppAudioTrack) {
         stream.addTrack(window._havenAppAudioTrack);
-        console.log('[Haven Desktop] Added per-app audio track to screen share');
+        console.log(`[Haven Desktop] Per-app audio track added (waited ${Date.now() - start}ms for first PCM)`);
       } else {
-        console.warn('[Haven Desktop] Per-app capture not ready; keeping system loopback audio for this share');
+        console.warn(`[Haven Desktop] Per-app capture produced no data within ${timeoutMs}ms — share will be silent (NOT falling back to system audio to avoid voice loop)`);
       }
     } else if (window._havenAppAudioTrack) {
-      // Defensive fallback for any path that sets a track without a selected PID.
-      stream.getAudioTracks().forEach(t => { stream.removeTrack(t); t.stop(); });
+      // Defensive fallback for any legacy path that pre-built a per-app
+      // track without setting _capturedAudioPid: prefer per-app over loopback.
+      stream.getAudioTracks().forEach(t => { try { stream.removeTrack(t); t.stop(); } catch {} });
       stream.addTrack(window._havenAppAudioTrack);
-      console.log('[Haven Desktop] Added per-app audio track to screen share');
+      console.log('[Haven Desktop] Added per-app audio track to screen share (defensive)');
     }
 
     // Auto-teardown when the video track ends (user stops sharing)
