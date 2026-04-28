@@ -32,17 +32,23 @@ public:
 
     bool                  IsSupported()          const override;
     std::vector<AudioApp> GetAudioApplications()       override;
-    bool                  StartCapture(uint32_t pid, AudioDataCb cb) override;
+    bool                  StartCapture(uint32_t pid,
+                                       CaptureMode mode,
+                                       AudioDataCb dataCb,
+                                       CaptureStatusCb statusCb) override;
     void                  StopCapture()                override;
     void                  Cleanup()                    override;
 
 private:
     void captureLoop();
+    void emitStatus(CaptureStatusKind kind, const std::string& msg, int64_t code = 0);
 
     std::atomic<bool> m_running{false};
     std::thread       m_thread;
     AudioDataCb       m_callback;
+    CaptureStatusCb   m_statusCallback;
     uint32_t          m_targetPid = 0;
+    CaptureMode       m_mode = CaptureMode::IncludeProcess;
     std::mutex        m_mutex;
     uint32_t          m_nullSinkModule = 0;  // PulseAudio module index
     uint32_t          m_loopbackModule = 0;  // loopback module index

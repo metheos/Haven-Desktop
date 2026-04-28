@@ -29,18 +29,30 @@ public:
 
     bool                  IsSupported()          const override;
     std::vector<AudioApp> GetAudioApplications()       override;
-    bool                  StartCapture(uint32_t pid, AudioDataCb cb) override;
+    bool                  StartCapture(uint32_t pid,
+                                       CaptureMode mode,
+                                       AudioDataCb dataCb,
+                                       CaptureStatusCb statusCb) override;
     void                  StopCapture()                override;
     void                  Cleanup()                    override;
 
 private:
     void captureLoop();
+    void emitStatus(CaptureStatusKind kind, const std::string& msg, int64_t code = 0);
 
     std::atomic<bool> m_running{false};
     std::thread       m_thread;
     AudioDataCb       m_callback;
+    CaptureStatusCb   m_statusCallback;
     uint32_t          m_targetPid = 0;
+    CaptureMode       m_mode = CaptureMode::IncludeProcess;
     std::mutex        m_mutex;
+
+    // Set by StartCapture before the thread starts; the thread signals
+    // m_initEvent once activation either succeeds or hard-fails so the
+    // caller can return synchronously with an accurate result.
+    void*             m_initEvent = nullptr; // HANDLE
+    std::atomic<bool> m_initOk{false};
 };
 
 } // namespace haven

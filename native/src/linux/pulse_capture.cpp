@@ -144,6 +144,30 @@ static void successCb(pa_context*, int, void* ud) {
 PulseCapture::PulseCapture() {}
 PulseCapture::~PulseCapture() { StopCapture(); }
 
+void PulseCapture::emitStatus(CaptureStatusKind kind, const std::string& msg, int64_t code) {
+    const char* kindStr = "?";
+    switch (kind) {
+        case CaptureStatusKind::Starting: kindStr = "STARTING"; break;
+        case CaptureStatusKind::Started:  kindStr = "STARTED";  break;
+        case CaptureStatusKind::Failed:   kindStr = "FAILED";   break;
+        case CaptureStatusKind::Stopped:  kindStr = "STOPPED";  break;
+    }
+    fprintf(stderr, "[Haven Pulse] status=%s code=%lld msg=%s\n",
+            kindStr, (long long)code, msg.c_str());
+    CaptureStatusCb cb;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        cb = m_statusCallback;
+    }
+    if (cb) {
+        CaptureStatus s;
+        s.kind = kind;
+        s.message = msg;
+        s.code = code;
+        try { cb(s); } catch (...) {}
+    }
+}
+
 bool PulseCapture::IsSupported() const {
     // Check if PulseAudio is available
     pa_simple* s = nullptr;
@@ -184,23 +208,46 @@ std::vector<AudioApp> PulseCapture::GetAudioApplications() {
     return result;
 }
 
-bool PulseCapture::StartCapture(uint32_t pid, AudioDataCb cb) {
+bool PulseCapture::StartCapture(uint32_t pid, CaptureMode mode,
+                                AudioDataCb dataCb, CaptureStatusCb statusCb) {
     StopCapture();
 
-    std::lock_guard<std::mutex> lock(m_mutex);
-    m_targetPid = pid;
-    m_callback  = cb;
-    m_running   = true;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_targetPid      = pid;
+        m_mode           = mode;
+        m_callback       = dataCb;
+        m_statusCallback = statusCb;
+        m_running        = true;
+    }
+
+    if (mode == CaptureMode::ExcludeProcess) {
+        // PulseAudio/PipeWire don't have a built-in equivalent to Windows'
+        // exclude-mode process loopback. Surface this clearly so the JS
+        // side can fall back to system-monitor capture explicitly.
+        emitStatus(CaptureStatusKind::Failed,
+            "Exclude-mode capture is not supported on Linux (PulseAudio/PipeWire)", 0);
+        m_running = false;
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_callback = nullptr;
+        m_statusCallback = nullptr;
+        return false;
+    }
+
+    emitStatus(CaptureStatusKind::Starting,
+        "preparing pulse capture for PID " + std::to_string(pid));
 
     m_thread = std::thread([this]() { captureLoop(); });
     return true;
 }
 
 void PulseCapture::StopCapture() {
-    m_running = false;
+    bool wasRunning = m_running.exchange(false);
     if (m_thread.joinable()) m_thread.join();
-    std::lock_guard<std::mutex> lock(m_mutex);
-    m_callback = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_callback = nullptr;
+    }
 
     // Clean up PulseAudio modules
     if (m_nullSinkModule != 0 || m_loopbackModule != 0) {
@@ -220,19 +267,33 @@ void PulseCapture::StopCapture() {
         m_nullSinkModule = 0;
         m_loopbackModule = 0;
     }
+    if (wasRunning) emitStatus(CaptureStatusKind::Stopped, "pulse capture stopped");
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_statusCallback = nullptr;
+    }
 }
 
 void PulseCapture::Cleanup() { StopCapture(); }
 
 void PulseCapture::captureLoop() {
     PaSync pa;
-    if (!pa.connect()) { m_running = false; return; }
+    if (!pa.connect()) {
+        emitStatus(CaptureStatusKind::Failed,
+            "pa_context_connect failed (PulseAudio/PipeWire daemon not reachable)");
+        m_running = false;
+        return;
+    }
 
     // ── Step 1: Find the target process's sink input ──────
     SinkInputEnumData ed;
 
     pa_operation* op = pa_context_get_sink_input_info_list(pa.ctx, sinkInputCb, &ed);
-    if (!op) { m_running = false; return; }
+    if (!op) {
+        emitStatus(CaptureStatusKind::Failed, "pa_context_get_sink_input_info_list returned NULL");
+        m_running = false;
+        return;
+    }
     while (!ed.done) pa.iterateBlock();
     pa_operation_unref(op);
 
@@ -248,7 +309,9 @@ void PulseCapture::captureLoop() {
     }
 
     if (targetSinkInput == PA_INVALID_INDEX) {
-        // No sink input found for this PID
+        emitStatus(CaptureStatusKind::Failed,
+            "No PulseAudio sink input found for PID " + std::to_string(m_targetPid) +
+            " (the app may have stopped producing audio)");
         m_running = false;
         return;
     }
@@ -428,7 +491,8 @@ void PulseCapture::captureLoop() {
     );
 
     if (!rec) {
-        fprintf(stderr, "[Haven AudioCapture] pa_simple_new failed: %s\n", pa_strerror(err));
+        emitStatus(CaptureStatusKind::Failed,
+            std::string("pa_simple_new failed: ") + pa_strerror(err), err);
         // Clean up modules before returning
         if (m_loopbackModule != 0) {
             OpDone od;
@@ -450,6 +514,16 @@ void PulseCapture::captureLoop() {
         }
         m_running = false;
         return;
+    }
+
+    emitStatus(CaptureStatusKind::Started, "pulse capture active");
+    // Prime the renderer-side first-packet gate.
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_callback) {
+            std::vector<float> silence(480, 0.0f);
+            m_callback(silence.data(), silence.size());
+        }
     }
 
     // Read PCM data in ~10 ms chunks

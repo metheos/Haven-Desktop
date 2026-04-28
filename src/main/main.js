@@ -1260,47 +1260,119 @@ function registerScreenShareHandler() {
       const selected = sources.find(s => s.id === result.sourceId);
       if (!selected) { callback({}); return; }
 
-      // Start per-app audio capture when a specific app was chosen
-      let usePerAppAudio = false;
-      if (result.audioAppPid && result.audioAppPid > 0) {
+      // Decide capture path based on picker result.
+      //   audioAppPid > 0  → INCLUDE-mode capture of that PID
+      //   audioAppPid === 'system' → EXCLUDE-mode capture of OUR PID
+      //                       (= all system audio minus Haven; no voice loop)
+      //   audioAppPid === 'none'   → no audio at all
+      //   undefined         → legacy "system audio" via Electron loopback
+      //                       (still includes Haven voice — kept only as a
+      //                        last-resort path; UI now defaults to 'system')
+      const startNative = (mode, pid) => {
+        const reasonRef = { msg: null };
+        let ok = false;
         try {
-          audioCapture.startCapture(result.audioAppPid, (pcmData) => {
-            try {
-              if (!pcmData || !pcmData.buffer) return;
-              // Send as a plain ArrayBuffer (not Float32Array) for reliable
-              // cross-context structured-clone transfer.  Typed arrays can
-              // arrive in the renderer with non-zero byteOffset from Node's
-              // Buffer pool, causing silent alignment failures.
-              const ab = pcmData.buffer.slice(
-                pcmData.byteOffset,
-                pcmData.byteOffset + pcmData.byteLength
-              );
-              safeSend(targetContents, 'audio:capture-data', ab);
-            } catch (cbErr) {
-              console.warn('[ScreenShare] audio callback error:', cbErr.message);
-            }
+          console.log(`[ScreenShare] starting native capture: mode=${mode} pid=${pid}`);
+          ok = audioCapture.startCapture(pid, {
+            mode,
+            onData: (pcmData) => {
+              try {
+                if (!pcmData || !pcmData.buffer) return;
+                const ab = pcmData.buffer.slice(
+                  pcmData.byteOffset,
+                  pcmData.byteOffset + pcmData.byteLength
+                );
+                safeSend(targetContents, 'audio:capture-data', ab);
+              } catch (cbErr) {
+                console.warn('[ScreenShare] audio callback error:', cbErr.message);
+              }
+            },
+            onStatus: (s) => {
+              safeSend(targetContents, 'audio:capture-status', s);
+              if (s.kind === 'failed') reasonRef.msg = s.message;
+            },
           });
-          usePerAppAudio = true;
         } catch (err) {
-          console.error('[ScreenShare] per-app audio start failed:', err.message);
+          console.error(`[ScreenShare] native capture (${mode}) threw:`, err.message);
+          reasonRef.msg = err.message;
+        }
+        return { ok, reason: reasonRef.msg };
+      };
+
+      // What the user wanted, and what we ended up with.
+      // requestedMode: 'app' | 'system' | 'none' | 'legacy-loopback'
+      // appliedMode  : 'app' | 'system-clean' | 'fallback-system-clean'
+      //              | 'system-loopback' | 'none'
+      let requestedMode = 'legacy-loopback';
+      let appliedMode   = 'system-loopback';
+      let appliedDetail = null; // optional human-readable string
+
+      let usePerAppAudio = false;
+
+      if (result.audioAppPid === 'none') {
+        requestedMode = 'none';
+        appliedMode   = 'none';
+      } else if (typeof result.audioAppPid === 'number' && result.audioAppPid > 0) {
+        requestedMode = 'app';
+        const appName = (audioApps.find(a => a.pid === result.audioAppPid) || {}).name || `pid ${result.audioAppPid}`;
+        const r1 = startNative('include', result.audioAppPid);
+        if (r1.ok) {
+          usePerAppAudio = true;
+          appliedMode    = 'app';
+          appliedDetail  = appName;
+          console.log(`[ScreenShare] per-app capture active for "${appName}"`);
+        } else {
+          // Per-app capture failed. Fall back to system-minus-Haven so the
+          // user gets *something* without creating a voice loop.
+          console.warn(`[ScreenShare] per-app capture failed (${r1.reason || 'unknown'}); falling back to system-minus-Haven`);
+          const r2 = startNative('exclude', process.pid);
+          if (r2.ok) {
+            usePerAppAudio = true;
+            appliedMode    = 'fallback-system-clean';
+            appliedDetail  = `app capture failed: ${r1.reason || 'unknown reason'}`;
+            console.log('[ScreenShare] fallback to system-minus-Haven active');
+          } else {
+            // Even exclude-mode failed. As a final last-resort, ask Electron
+            // for raw loopback (will include Haven voice — voice loop risk —
+            // but better than silence per user preference for per-app fail).
+            console.warn(`[ScreenShare] system-minus-Haven also failed (${r2.reason || 'unknown'}); using Electron loopback as last resort`);
+            appliedMode   = 'system-loopback';
+            appliedDetail = `native capture unavailable: ${r2.reason || r1.reason || 'unknown'}`;
+          }
+        }
+      } else if (result.audioAppPid === 'system') {
+        requestedMode = 'system';
+        const r = startNative('exclude', process.pid);
+        if (r.ok) {
+          usePerAppAudio = true;
+          appliedMode    = 'system-clean';
+        } else {
+          console.warn(`[ScreenShare] exclude-mode failed (${r.reason || 'unknown'}); using Electron loopback as fallback`);
+          appliedMode   = 'system-loopback';
+          appliedDetail = `clean system audio unavailable: ${r.reason || 'unknown'}`;
         }
       }
 
+      // Tell the renderer which mode we ended up in (for the indicator)
+      safeSend(targetContents, 'audio:share-mode', {
+        requested: requestedMode,
+        applied:   appliedMode,
+        detail:    appliedDetail,
+      });
+
       // Audio routing for the share:
-      //   • Per-app audio: video-only stream from Electron — the renderer
-      //     adds the per-app MediaStreamTrack once native PCM is alive.
-      //     We deliberately do NOT request system loopback here: if the
-      //     native pipeline is slow or fails, the share goes silent rather
-      //     than leaking ALL system audio (which includes Haven's own
-      //     voice output and creates a feedback loop). See issue #5305.
-      //   • "none": user explicitly chose silence.
-      //   • Otherwise (system audio): standard loopback.
+      //   • usePerAppAudio: video-only from Electron; renderer attaches the
+      //     native PCM track via MediaStreamDestination.
+      //   • appliedMode === 'system-loopback': last-ditch Electron loopback.
+      //   • appliedMode === 'none': silent share.
       if (usePerAppAudio) {
         callback({ video: selected });
-      } else if (result.audioAppPid === 'none') {
-        callback({ video: selected });
-      } else {
+      } else if (appliedMode === 'system-loopback') {
+        console.warn('[ScreenShare] using Electron system-loopback (last-resort fallback; may include Haven voice)');
         callback({ video: selected, audio: 'loopback' });
+      } else {
+        // 'none' — explicit silent share.
+        callback({ video: selected });
       }
 
     } catch (err) {
@@ -1358,12 +1430,16 @@ function registerIPC() {
   ipcMain.handle('audio:get-apps',      () => { try { return audioCapture.getAudioApplications(); } catch { return []; } });
   ipcMain.handle('audio:start-capture',  (_e, pid) => {
     try {
-      return audioCapture.startCapture(pid, pcm => {
-        try {
-          if (!pcm || !pcm.buffer) return;
-          const ab = pcm.buffer.slice(pcm.byteOffset, pcm.byteOffset + pcm.byteLength);
-          safeSend(getActiveContents(), 'audio:capture-data', ab);
-        } catch { /* non-critical */ }
+      return audioCapture.startCapture(pid, {
+        mode: 'include',
+        onData: pcm => {
+          try {
+            if (!pcm || !pcm.buffer) return;
+            const ab = pcm.buffer.slice(pcm.byteOffset, pcm.byteOffset + pcm.byteLength);
+            safeSend(getActiveContents(), 'audio:capture-data', ab);
+          } catch { /* non-critical */ }
+        },
+        onStatus: s => safeSend(getActiveContents(), 'audio:capture-status', s),
       });
     } catch (e) { console.error('[AudioCapture] start-capture IPC failed:', e.message); return false; }
   });

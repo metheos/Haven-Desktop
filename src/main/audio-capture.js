@@ -64,34 +64,74 @@ class AudioCaptureManager {
   }
 
   /**
-   * Start capturing audio from a specific PID.
-   * @param {number} pid  Process ID to capture
-   * @param {function} cb  Receives Float32Array PCM chunks (48 kHz mono)
+   * Start capturing audio.
+   * @param {number} pid               Target process ID
+   * @param {Object} opts              Capture options
+   * @param {'include'|'exclude'} [opts.mode='include']
+   *                                   include: capture FROM this PID tree
+   *                                   exclude: capture all system audio EXCEPT this PID tree
+   *                                   (Windows only — Linux returns failure for exclude)
+   * @param {function} opts.onData     Receives Float32Array PCM chunks (48 kHz mono)
+   * @param {function} [opts.onStatus] Receives {kind, message, code} status events.
+   *                                   kinds: 'starting' | 'started' | 'failed' | 'stopped'
+   * @returns {boolean} true if synchronous activation succeeded
    */
-  startCapture(pid, cb) {
+  startCapture(pid, opts) {
     if (!this._addon) throw new Error('Native audio capture addon not available');
+
+    // Backwards-compatible: startCapture(pid, fn) → include-mode.
+    if (typeof opts === 'function') {
+      opts = { mode: 'include', onData: opts };
+    }
+    const mode    = (opts && opts.mode) === 'exclude' ? 'exclude' : 'include';
+    const onData  = opts && opts.onData;
+    const onStatus = opts && opts.onStatus;
+    if (typeof onData !== 'function') throw new Error('startCapture: onData callback required');
+
     if (this._capturing) this.stopCapture();
 
-    this._callback  = cb;
-    this._capturing = true;
+    this._callback   = onData;
+    this._onStatus   = onStatus || null;
+    this._capturing  = true;
     this._lastDataAt = Date.now();
+    this._initFailed = false;
+    this._lastStatus = null;
+
+    const dataWrap = (pcm) => {
+      this._lastDataAt = Date.now();
+      if (this._callback) this._callback(pcm);
+    };
+
+    const statusWrap = (s) => {
+      this._lastStatus = s;
+      if (s && s.kind === 'failed') this._initFailed = true;
+      console.log(`[AudioCapture] native status: ${s?.kind} (code=0x${(s?.code >>> 0).toString(16)}) — ${s?.message}`);
+      if (this._onStatus) {
+        try { this._onStatus(s); } catch (e) { console.warn('[AudioCapture] onStatus threw:', e.message); }
+      }
+    };
 
     try {
-      this._addon.startCapture(pid, (pcm) => {
-        this._lastDataAt = Date.now();
-        if (this._callback) this._callback(pcm);
-      });
-      console.log(`[AudioCapture] Capturing PID ${pid}`);
+      const ok = this._addon.startCapture(pid, mode, dataWrap, statusWrap);
+      if (!ok) {
+        this._capturing = false;
+        this._callback  = null;
+        const reason = this._lastStatus?.message || 'native startCapture returned false';
+        console.warn(`[AudioCapture] start failed (mode=${mode}, pid=${pid}): ${reason}`);
+        return false;
+      }
+      console.log(`[AudioCapture] Capturing PID ${pid} (mode=${mode})`);
 
-      // Watchdog: if no data arrives for 8 seconds after start, the native
-      // capture thread likely crashed or failed silently.  Stop gracefully
-      // instead of leaving the capture in a broken state.
+      // Watchdog: if no data arrives for 12 seconds after start, the native
+      // capture thread likely went silent on us (target PID exited, etc).
+      // Bumped from 8s because some sources (paused games) take a while to
+      // produce real audio; the native heartbeat keeps lastDataAt fresh.
       this._watchdog = setTimeout(() => {
-        if (this._capturing && Date.now() - this._lastDataAt > 7000) {
-          console.warn('[AudioCapture] No data received — stopping capture (native thread may have failed)');
+        if (this._capturing && Date.now() - this._lastDataAt > 11000) {
+          console.warn('[AudioCapture] No data received in 11s — stopping capture');
           this.stopCapture();
         }
-      }, 8000);
+      }, 12000);
 
       return true;
     } catch (e) {

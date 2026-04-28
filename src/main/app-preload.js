@@ -598,6 +598,26 @@ ipcRenderer.on('server:log', (_event, msg) => {
 
 // ─── Receive PCM chunks from native addon (main process) ─
 let _ipcDataCount = 0;
+// Track latest native capture status reported by the addon. Lets the
+// getDisplayMedia override abort its readiness wait early on hard failure
+// instead of always burning the full timeout.
+let _lastNativeStatus = null;
+ipcRenderer.on('audio:capture-status', (_event, status) => {
+  _lastNativeStatus = status;
+  const codeHex = '0x' + ((status?.code || 0) >>> 0).toString(16);
+  console.log(`[Haven Desktop] native capture status: kind=${status?.kind} code=${codeHex} msg=${status?.message}`);
+});
+
+// Resolved share-audio mode reported by main once the picker handler decides
+// what audio path to use (per-app / system-clean / fallback / loopback / none).
+// Forwarded to the page so the webapp can show a small mode indicator.
+ipcRenderer.on('audio:share-mode', (_event, modeInfo) => {
+  console.log('[Haven Desktop] share audio mode:', modeInfo);
+  try {
+    window.__havenShareAudioMode = modeInfo;
+    window.dispatchEvent(new CustomEvent('haven:share-audio-mode', { detail: modeInfo }));
+  } catch (e) { console.warn('[Haven Desktop] dispatch share-mode event failed:', e.message); }
+});
 ipcRenderer.on('audio:capture-data', (_event, pcmData) => {
   // Build a Float32Array from whatever Electron's IPC delivers.
   // The main process now sends a plain ArrayBuffer (guaranteed offset-0),
@@ -759,24 +779,34 @@ function showScreenPicker(sources, audioApps) {
   };
   appsEl.appendChild(muteEl);
 
-  // "System Audio" option — always shown, selected by default
+  // "System Audio (no Haven voice)" — selected by default. On Windows we
+  // capture system audio via WASAPI exclude-mode so Haven's own voice output
+  // is filtered out. On Linux we fall back to Electron loopback (still
+  // includes Haven voice; can't be helped without OS-level support yet).
   const sysEl = document.createElement('div');
   sysEl.className = 'hsp-app sel';
   sysEl.innerHTML = '🔊&nbsp; System Audio';
+  selAudioPid = 'system';
   sysEl.onclick = () => {
     appsEl.querySelectorAll('.sel').forEach(a => a.classList.remove('sel'));
     sysEl.classList.add('sel');
-    selAudioPid = null;
+    selAudioPid = 'system';
   };
   appsEl.appendChild(sysEl);
 
-  // Per-app entries when native module is available
+  // Per-app entries when native module is available. Inactive sessions
+  // (paused YouTube tabs, idle games) are shown but visually dimmed.
   if (audioApps && audioApps.length) {
     audioApps.forEach(a => {
       const el = document.createElement('div');
       el.className = 'hsp-app';
+      if (a.active === false) el.style.opacity = '0.55';
       const icon = a.icon ? `<img class="ico" src="${a.icon}" alt="">` : '🔊';
-      el.innerHTML = `${icon}<span>${a.name}</span>`;
+      const dim  = a.active === false ? ' <span style="color:#888;font-size:11px">(silent)</span>' : '';
+      el.innerHTML = `${icon}<span>${a.name}${dim}</span>`;
+      el.title = a.active === false
+        ? 'This app is currently silent. Capture will start as soon as it produces audio.'
+        : a.name;
       el.onclick = () => {
         appsEl.querySelectorAll('.sel').forEach(x => x.classList.remove('sel'));
         el.classList.add('sel');
@@ -798,17 +828,21 @@ function showScreenPicker(sources, audioApps) {
     try { document.body?.focus(); window.focus(); } catch {}
 
     let effectiveAudioPid = selAudioPid;
-    if (!cancelled && selAudioPid && selAudioPid !== 'none') {
+    // Native pipeline applies to per-app PIDs AND to 'system' (which uses
+    // WASAPI exclude-mode in main to strip Haven's voice from the share).
+    const wantsNativePipeline = !cancelled && selAudioPid &&
+                                selAudioPid !== 'none';
+    if (wantsNativePipeline) {
       _capturedAudioPid = selAudioPid;
-      // Build the audio pipeline BEFORE sending the picker result,
-      // so the per-app track is ready when getDisplayMedia resolves.
+      console.log(`[Haven Desktop] Picker dismissed: building native audio pipeline for ${selAudioPid}`);
       const pipelineOk = await buildAudioPipeline();
       if (!pipelineOk) {
-        // Pipeline failed — fall back to system loopback so the user
-        // at least gets some audio rather than complete silence.
-        console.warn('[Haven Desktop] Per-app audio unavailable, falling back to system audio');
+        console.warn('[Haven Desktop] Local audio pipeline failed to build — main will fall back to Electron loopback for system audio, or silence for per-app');
         _capturedAudioPid = null;
-        effectiveAudioPid = null;
+        // For per-app picks, leave effectiveAudioPid alone — main will see
+        // the request and try to start native capture; if that ALSO fails
+        // it stays silent. For 'system' picks, leave it as 'system' too —
+        // main will try exclude-mode and last-ditch fall back to loopback.
       }
     }
 
@@ -1071,38 +1105,72 @@ function installGetDisplayMediaOverride() {
   const _origGDM = navigator.mediaDevices.getDisplayMedia.bind(navigator.mediaDevices);
 
   navigator.mediaDevices.getDisplayMedia = async function (constraints) {
-    const stream = await _origGDM(constraints);
+    // Reset native status before each share so a stale "failed" from a
+    // prior session doesn't poison the next attempt.
+    _lastNativeStatus = null;
 
-    // If a per-app PID was selected, the main process returns a video-only
-    // stream (no system loopback). We wait for the native capture path to
-    // produce its first PCM packet, then add the per-app audio track to
-    // the share. If native capture never delivers data we leave the share
-    // silent — we DO NOT fall back to system loopback, which would leak
-    // Haven's own voice output back into the share (issue #5305).
+    const stream = await _origGDM(constraints);
+    const audioTracksFromElectron = stream.getAudioTracks().length;
+    console.log(`[Haven Desktop] getDisplayMedia resolved (capturedAudioPid=${_capturedAudioPid}, electron-audio-tracks=${audioTracksFromElectron}, per-app track ready=${!!window._havenAppAudioTrack})`);
+
+    // If a native capture was requested (per-app PID OR 'system' exclude-mode),
+    // wait for the first PCM packet to land, then add the per-app track.
     if (_capturedAudioPid) {
-      // Strip any audio tracks Electron may have included (defensive — main
-      // process should already be returning video-only for per-app shares).
+      // For per-app captures: drop any audio tracks Electron may have
+      // included (we asked for video-only but be defensive).
+      // For 'system' exclude-mode: same — main asked for video-only.
       stream.getAudioTracks().forEach(t => { try { stream.removeTrack(t); t.stop(); } catch {} });
 
-      const timeoutMs = 5000;
-      const stepMs = 50;
-      const start = Date.now();
-      while (_audioPacketsReceived < 1 && (Date.now() - start) < timeoutMs) {
+      const timeoutMs = 8000;
+      const stepMs    = 100;
+      const start     = Date.now();
+      let lastLog     = 0;
+      while ((Date.now() - start) < timeoutMs) {
+        if (_audioPacketsReceived > 0) break;
+        // Abort early on hard failure from native side.
+        if (_lastNativeStatus && _lastNativeStatus.kind === 'failed') {
+          console.warn(`[Haven Desktop] native capture reported FAILED during readiness wait — aborting wait`);
+          break;
+        }
+        if (Date.now() - lastLog > 1000) {
+          lastLog = Date.now();
+          console.log(`[Haven Desktop] waiting for first PCM packet... elapsed=${Date.now() - start}ms received=${_audioPacketsReceived} status=${_lastNativeStatus?.kind || 'none'}`);
+        }
         await new Promise(resolve => setTimeout(resolve, stepMs));
       }
 
       if (_audioPacketsReceived > 0 && window._havenAppAudioTrack) {
         stream.addTrack(window._havenAppAudioTrack);
-        console.log(`[Haven Desktop] Per-app audio track added (waited ${Date.now() - start}ms for first PCM)`);
+        console.log(`[Haven Desktop] per-app/system-exclude audio track added (waited ${Date.now() - start}ms, ${_audioPacketsReceived} PCM chunks received)`);
       } else {
-        console.warn(`[Haven Desktop] Per-app capture produced no data within ${timeoutMs}ms — share will be silent (NOT falling back to system audio to avoid voice loop)`);
+        // No PCM arrived. We do NOT silently substitute system loopback —
+        // that's the bug from issue #5305. Either:
+        //   - native init failed (we logged it above), or
+        //   - the renderer-side AudioWorklet pipeline isn't pumping
+        //   - the IPC channel between main and renderer dropped packets
+        // Diagnostics dump:
+        console.warn('[Haven Desktop] readiness wait expired without PCM. Diagnostics:');
+        console.warn('  capturedAudioPid:', _capturedAudioPid);
+        console.warn('  packetsReceived:', _audioPacketsReceived);
+        console.warn('  ipcDataCount:', _ipcDataCount);
+        console.warn('  havenAppAudioTrack present:', !!window._havenAppAudioTrack);
+        console.warn('  audioCtx state:', _audioCtx?.state);
+        console.warn('  audioWorkletNode present:', !!_audioWorkletNode);
+        console.warn('  havenAppAudioPush present:', !!window._havenAppAudioPush);
+        console.warn('  lastNativeStatus:', _lastNativeStatus);
+        console.warn('  Share will be SILENT (no system-loopback fallback to avoid voice loop).');
       }
     } else if (window._havenAppAudioTrack) {
-      // Defensive fallback for any legacy path that pre-built a per-app
-      // track without setting _capturedAudioPid: prefer per-app over loopback.
+      // Defensive: a per-app track exists but no _capturedAudioPid was set.
+      // Prefer per-app over loopback to be safe.
       stream.getAudioTracks().forEach(t => { try { stream.removeTrack(t); t.stop(); } catch {} });
       stream.addTrack(window._havenAppAudioTrack);
-      console.log('[Haven Desktop] Added per-app audio track to screen share (defensive)');
+      console.log('[Haven Desktop] Added pre-existing per-app audio track to share (defensive)');
+    } else {
+      // No native capture requested. Whatever Electron returned (loopback or
+      // nothing) is what we use. If audio was requested via constraints but
+      // not delivered, that's an Electron-level issue, not ours.
+      console.log(`[Haven Desktop] no native capture requested; using Electron-provided audio (${audioTracksFromElectron} track(s))`);
     }
 
     // Auto-teardown when the video track ends (user stops sharing)

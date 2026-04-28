@@ -158,7 +158,10 @@ bool WasapiCapture::IsSupported() const {
 }
 
 // ── GetAudioApplications ───────────────────────────────────
-// Enumerates active audio sessions via WASAPI session manager.
+// Enumerates audio sessions via WASAPI session manager.
+// Includes BOTH active AND inactive sessions so the picker can
+// show apps that are paused/silent (a paused YouTube tab still
+// has a session — users routinely want to resume + share it).
 std::vector<AudioApp> WasapiCapture::GetAudioApplications() {
     std::vector<AudioApp> result;
 
@@ -184,6 +187,7 @@ std::vector<AudioApp> WasapiCapture::GetAudioApplications() {
 
     // Track PIDs we've already seen (avoid duplicates)
     std::vector<DWORD> seen;
+    DWORD ourPid = GetCurrentProcessId();
 
     for (int i = 0; i < count; i++) {
         IAudioSessionControl* ctrl = nullptr;
@@ -194,26 +198,33 @@ std::vector<AudioApp> WasapiCapture::GetAudioApplications() {
             ctrl->Release(); continue;
         }
 
-        // Skip system sounds
+        // Skip system sounds and Haven Desktop itself (sharing our own
+        // audio just creates a feedback loop — see issue #5305).
         if (ctrl2->IsSystemSoundsSession() == S_OK) {
             ctrl2->Release(); ctrl->Release(); continue;
         }
 
         DWORD pid = 0;
         ctrl2->GetProcessId(&pid);
-        if (pid == 0 || std::find(seen.begin(), seen.end(), pid) != seen.end()) {
+        if (pid == 0 || pid == ourPid ||
+            std::find(seen.begin(), seen.end(), pid) != seen.end()) {
             ctrl2->Release(); ctrl->Release(); continue;
         }
         seen.push_back(pid);
 
-        // Session state — only include active sessions
-        AudioSessionState state;
-        if (SUCCEEDED(ctrl->GetState(&state)) && state == AudioSessionStateActive) {
-            AudioApp app;
-            app.pid  = pid;
-            app.name = ProcessNameFromPid(pid);
-            result.push_back(app);
+        AudioSessionState state = AudioSessionStateInactive;
+        ctrl->GetState(&state);
+
+        AudioApp app;
+        app.pid    = pid;
+        app.name   = ProcessNameFromPid(pid);
+        app.active = (state == AudioSessionStateActive);
+        // Skip sessions for processes we can't even name — usually short-lived
+        // helpers that already exited.
+        if (app.name == "Unknown") {
+            ctrl2->Release(); ctrl->Release(); continue;
         }
+        result.push_back(app);
 
         ctrl2->Release();
         ctrl->Release();
@@ -227,40 +238,139 @@ std::vector<AudioApp> WasapiCapture::GetAudioApplications() {
     return result;
 }
 
+// ── emitStatus helper ──────────────────────────────────────
+void WasapiCapture::emitStatus(CaptureStatusKind kind, const std::string& msg, int64_t code) {
+    {
+        char dbg[512];
+        const char* kindStr = "?";
+        switch (kind) {
+            case CaptureStatusKind::Starting: kindStr = "STARTING"; break;
+            case CaptureStatusKind::Started:  kindStr = "STARTED";  break;
+            case CaptureStatusKind::Failed:   kindStr = "FAILED";   break;
+            case CaptureStatusKind::Stopped:  kindStr = "STOPPED";  break;
+        }
+        _snprintf_s(dbg, sizeof(dbg), _TRUNCATE,
+            "[Haven WASAPI] status=%s code=0x%llx msg=%s\n",
+            kindStr, (long long)code, msg.c_str());
+        OutputDebugStringA(dbg);
+    }
+    CaptureStatusCb cb;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        cb = m_statusCallback;
+    }
+    if (cb) {
+        CaptureStatus s;
+        s.kind = kind;
+        s.message = msg;
+        s.code = code;
+        try { cb(s); } catch (...) {}
+    }
+}
+
 // ── StartCapture ───────────────────────────────────────────
-bool WasapiCapture::StartCapture(uint32_t pid, AudioDataCb cb) {
+// Synchronously activates the audio interface so the caller
+// gets an accurate true/false return based on actual init success.
+// The background thread only runs the read loop after init succeeds.
+bool WasapiCapture::StartCapture(uint32_t pid, CaptureMode mode,
+                                 AudioDataCb dataCb, CaptureStatusCb statusCb) {
     StopCapture();
 
-    std::lock_guard<std::mutex> lock(m_mutex);
-    m_targetPid = pid;
-    m_callback  = cb;
-    m_running   = true;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_targetPid      = pid;
+        m_mode           = mode;
+        m_callback       = dataCb;
+        m_statusCallback = statusCb;
+        m_initOk         = false;
+    }
 
+    // Pre-flight: verify PID is valid and accessible.
+    {
+        HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (!h) {
+            DWORD err = GetLastError();
+            emitStatus(CaptureStatusKind::Failed,
+                "OpenProcess failed for target PID — process may have exited or be protected",
+                err);
+            return false;
+        }
+        CloseHandle(h);
+    }
+
+    if (m_initEvent) { CloseHandle(m_initEvent); m_initEvent = nullptr; }
+    m_initEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!m_initEvent) {
+        emitStatus(CaptureStatusKind::Failed, "CreateEvent failed", GetLastError());
+        return false;
+    }
+
+    emitStatus(CaptureStatusKind::Starting,
+        std::string("activating ") +
+        (mode == CaptureMode::ExcludeProcess ? "EXCLUDE-mode" : "INCLUDE-mode") +
+        " process loopback for PID " + std::to_string(pid));
+
+    m_running = true;
     m_thread = std::thread([this]() { captureLoop(); });
+
+    // Wait up to 4 seconds for the thread to signal init complete.
+    DWORD waitResult = WaitForSingleObject(m_initEvent, 4000);
+    if (waitResult != WAIT_OBJECT_0 || !m_initOk.load()) {
+        // Init didn't complete in time, or completed with failure.
+        // The capture thread may still be retrying — stop it cleanly.
+        if (waitResult != WAIT_OBJECT_0) {
+            emitStatus(CaptureStatusKind::Failed,
+                "WASAPI activation timed out (>4s)", 0);
+        }
+        m_running = false;
+        if (m_thread.joinable()) m_thread.join();
+        CloseHandle(m_initEvent); m_initEvent = nullptr;
+        return false;
+    }
+
     return true;
 }
 
 // ── StopCapture ────────────────────────────────────────────
 void WasapiCapture::StopCapture() {
-    m_running = false;
+    bool wasRunning = m_running.exchange(false);
     if (m_thread.joinable()) m_thread.join();
-    std::lock_guard<std::mutex> lock(m_mutex);
-    m_callback = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_callback = nullptr;
+    }
+    if (m_initEvent) { CloseHandle(m_initEvent); m_initEvent = nullptr; }
+    if (wasRunning) {
+        emitStatus(CaptureStatusKind::Stopped, "capture stopped");
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_statusCallback = nullptr;
+    }
 }
 
 void WasapiCapture::Cleanup() { StopCapture(); }
 
 // ── Capture Loop ───────────────────────────────────────────
-// Runs on a dedicated thread. Activates per-process loopback
-// and reads PCM until m_running becomes false.
+// Activation runs on this thread, but we signal m_initEvent as
+// soon as init succeeds OR hard-fails so StartCapture can return
+// synchronously with an accurate result. After init: just the
+// read loop runs here.
 void WasapiCapture::captureLoop() {
+    auto signalInit = [&](bool ok) {
+        m_initOk = ok;
+        if (m_initEvent) SetEvent((HANDLE)m_initEvent);
+    };
+
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
     // ── Set up process-loopback activation params ──────────
     AUDIOCLIENT_ACTIVATION_PARAMS acParams = {};
     acParams.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
     acParams.ProcessLoopbackParams.ProcessLoopbackMode =
-        PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE;
+        (m_mode == CaptureMode::ExcludeProcess)
+            ? PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE
+            : PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE;
     acParams.ProcessLoopbackParams.TargetProcessId = m_targetPid;
 
     PROPVARIANT pv = {};
@@ -281,27 +391,34 @@ void WasapiCapture::captureLoop() {
     );
 
     if (FAILED(hr)) {
+        emitStatus(CaptureStatusKind::Failed,
+            "ActivateAudioInterfaceAsync returned failure (process loopback API may be unavailable)",
+            hr);
         handler->Release();
         CoUninitialize();
         m_running = false;
+        signalInit(false);
         return;
     }
 
-    hr = handler->Wait(10000);
+    hr = handler->Wait(8000);
     IAudioClient* client = handler->GetClient();
     if (asyncOp) asyncOp->Release();
     handler->Release();
 
     if (FAILED(hr) || !client) {
+        emitStatus(CaptureStatusKind::Failed,
+            (hr == E_ACCESSDENIED)
+                ? "Process loopback denied (target may be a protected/UWP process)"
+                : "ActivateCompleted reported failure",
+            hr);
         CoUninitialize();
         m_running = false;
+        signalInit(false);
         return;
     }
 
     // ── Opt out of Windows communications ducking ──────────
-    // Without this, Windows may classify our loopback capture as a
-    // "Communications" stream and automatically duck (lower) the volume
-    // of the Haven app and other audio while capture is active.
     {
         IAudioClient2* client2 = nullptr;
         if (SUCCEEDED(client->QueryInterface(__uuidof(IAudioClient2), (void**)&client2))) {
@@ -324,12 +441,10 @@ void WasapiCapture::captureLoop() {
     fmt.nBlockAlign     = fmt.nChannels * (fmt.wBitsPerSample / 8);
     fmt.nAvgBytesPerSec = fmt.nSamplesPerSec * fmt.nBlockAlign;
 
-    // Track the actual capture format so the read loop can adapt
     int captureChannels    = 2;
     bool captureIsFloat    = true;
     int  captureBitsPerSample = 32;
 
-    // Try shared-mode with our preferred format
     hr = client->Initialize(
         AUDCLNT_SHAREMODE_SHARED,
         AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
@@ -338,29 +453,39 @@ void WasapiCapture::captureLoop() {
     );
 
     if (FAILED(hr)) {
-        // Fallback: use the mix format (AUTOCONVERTPCM is a no-op here
-        // since we're requesting the device's native format, so we must
-        // adapt our read loop to match the actual format.)
+        // Fallback to mix format
         WAVEFORMATEX* mixFmt = nullptr;
         client->GetMixFormat(&mixFmt);
         if (mixFmt) {
             captureChannels       = mixFmt->nChannels;
             captureBitsPerSample  = mixFmt->wBitsPerSample;
             captureIsFloat        = (mixFmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) ||
-                                    (mixFmt->wFormatTag == 0xFFFE /* WAVE_FORMAT_EXTENSIBLE */
+                                    (mixFmt->wFormatTag == 0xFFFE
                                      && mixFmt->wBitsPerSample == 32);
-            hr = client->Initialize(
+            HRESULT hr2 = client->Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
                 AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
                     AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
                 0, 0, mixFmt, nullptr
             );
             CoTaskMemFree(mixFmt);
-        }
-        if (FAILED(hr)) {
+            if (FAILED(hr2)) {
+                emitStatus(CaptureStatusKind::Failed,
+                    "IAudioClient::Initialize failed for both preferred and mix formats",
+                    hr2);
+                client->Release();
+                CoUninitialize();
+                m_running = false;
+                signalInit(false);
+                return;
+            }
+        } else {
+            emitStatus(CaptureStatusKind::Failed,
+                "Initialize failed and GetMixFormat returned no format", hr);
             client->Release();
             CoUninitialize();
             m_running = false;
+            signalInit(false);
             return;
         }
     }
@@ -369,52 +494,94 @@ void WasapiCapture::captureLoop() {
     IAudioCaptureClient* capture = nullptr;
     hr = client->GetService(__uuidof(IAudioCaptureClient), (void**)&capture);
     if (FAILED(hr)) {
+        emitStatus(CaptureStatusKind::Failed,
+            "GetService(IAudioCaptureClient) failed", hr);
         client->Release();
         CoUninitialize();
         m_running = false;
+        signalInit(false);
         return;
     }
 
     hr = client->Start();
     if (FAILED(hr)) {
+        emitStatus(CaptureStatusKind::Failed, "IAudioClient::Start failed", hr);
         capture->Release();
         client->Release();
         CoUninitialize();
         m_running = false;
+        signalInit(false);
         return;
     }
 
+    // Init succeeded — let StartCapture return true.
+    {
+        char dbg[256];
+        _snprintf_s(dbg, sizeof(dbg), _TRUNCATE,
+            "[Haven WASAPI] activation succeeded: mode=%s pid=%u channels=%d bits=%d isFloat=%d\n",
+            (m_mode == CaptureMode::ExcludeProcess) ? "EXCLUDE" : "INCLUDE",
+            m_targetPid, captureChannels, captureBitsPerSample, captureIsFloat ? 1 : 0);
+        OutputDebugStringA(dbg);
+    }
+    emitStatus(CaptureStatusKind::Started, "WASAPI process loopback active");
+    signalInit(true);
+
+    // Emit one immediate silence packet so the renderer's "first packet
+    // arrived" gate flips right away, even if the source app is silent.
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_callback) {
+            std::vector<float> silence(480, 0.0f); // 10 ms at 48 kHz
+            m_callback(silence.data(), silence.size());
+        }
+    }
+
     // ── Read loop ─────────────────────────────────────────
-    // We read at ~10 ms intervals. Each packet is converted
-    // from stereo float32 → mono float32, then sent to JS.
     std::vector<float> monoBuffer;
-    monoBuffer.reserve(4800); // 100 ms at 48 kHz
+    monoBuffer.reserve(4800);
+
+    DWORD lastPacketTickMs = GetTickCount();
+    int   consecutiveErrors = 0;
 
     while (m_running) {
         Sleep(10);
 
+        bool gotPacket = false;
         UINT32 packetLen = 0;
         while (m_running) {
             hr = capture->GetNextPacketSize(&packetLen);
-            if (FAILED(hr) || packetLen == 0) break;
+            if (FAILED(hr)) {
+                if (++consecutiveErrors >= 50) {
+                    emitStatus(CaptureStatusKind::Failed,
+                        "GetNextPacketSize repeatedly failed — aborting capture", hr);
+                    m_running = false;
+                }
+                break;
+            }
+            if (packetLen == 0) break;
+            consecutiveErrors = 0;
 
             BYTE*  data   = nullptr;
             UINT32 frames = 0;
             DWORD  flags  = 0;
 
             hr = capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr);
-            if (FAILED(hr)) break;
+            if (FAILED(hr)) {
+                if (++consecutiveErrors >= 50) {
+                    emitStatus(CaptureStatusKind::Failed,
+                        "GetBuffer repeatedly failed — aborting capture", hr);
+                    m_running = false;
+                }
+                break;
+            }
 
             if (frames > 0) {
                 const float* fdata = reinterpret_cast<const float*>(data);
                 monoBuffer.clear();
 
                 if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) || !data) {
-                    // Explicitly propagate silence so the renderer can treat
-                    // the capture path as alive even when the source app is quiet.
                     monoBuffer.resize(frames, 0.0f);
                 } else if (captureIsFloat && captureBitsPerSample == 32) {
-                    // Float32 — sum all channels and divide
                     for (UINT32 f = 0; f < frames; f++) {
                         float sum = 0.0f;
                         for (int ch = 0; ch < captureChannels; ch++) {
@@ -423,7 +590,6 @@ void WasapiCapture::captureLoop() {
                         monoBuffer.push_back(sum / (float)captureChannels);
                     }
                 } else if (!captureIsFloat && captureBitsPerSample == 16) {
-                    // 16-bit signed PCM — convert to float and mix down
                     const int16_t* idata = reinterpret_cast<const int16_t*>(data);
                     for (UINT32 f = 0; f < frames; f++) {
                         float sum = 0.0f;
@@ -433,7 +599,6 @@ void WasapiCapture::captureLoop() {
                         monoBuffer.push_back(sum / (float)captureChannels);
                     }
                 } else {
-                    // Unknown format — treat as stereo float32 (best effort)
                     for (UINT32 f = 0; f < frames; f++) {
                         float left  = fdata[f * 2];
                         float right = fdata[f * 2 + 1];
@@ -441,14 +606,28 @@ void WasapiCapture::captureLoop() {
                     }
                 }
 
-                // Deliver to JS
                 std::lock_guard<std::mutex> lock(m_mutex);
                 if (m_callback) {
                     m_callback(monoBuffer.data(), monoBuffer.size());
+                    gotPacket = true;
+                    lastPacketTickMs = GetTickCount();
                 }
             }
 
             capture->ReleaseBuffer(frames);
+        }
+
+        // Heartbeat: if the source app has been silent for >250 ms, push
+        // a silence packet so the receive side keeps a live data stream
+        // (and the renderer-side "first packet arrived" gate keeps firing
+        // even for paused sources).
+        if (!gotPacket && (GetTickCount() - lastPacketTickMs) > 250) {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_callback) {
+                std::vector<float> silence(480, 0.0f);
+                m_callback(silence.data(), silence.size());
+                lastPacketTickMs = GetTickCount();
+            }
         }
     }
 

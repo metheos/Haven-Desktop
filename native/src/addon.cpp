@@ -34,9 +34,10 @@ static Napi::Value GetAudioApplications(const Napi::CallbackInfo& info) {
     Napi::Array arr = Napi::Array::New(env, apps.size());
     for (size_t i = 0; i < apps.size(); i++) {
         Napi::Object obj = Napi::Object::New(env);
-        obj.Set("pid",  Napi::Number::New(env, apps[i].pid));
-        obj.Set("name", Napi::String::New(env, apps[i].name));
-        obj.Set("icon", Napi::String::New(env, apps[i].icon));
+        obj.Set("pid",    Napi::Number::New(env, apps[i].pid));
+        obj.Set("name",   Napi::String::New(env, apps[i].name));
+        obj.Set("icon",   Napi::String::New(env, apps[i].icon));
+        obj.Set("active", Napi::Boolean::New(env, apps[i].active));
         arr[i] = obj;
     }
     return arr;
@@ -46,36 +47,62 @@ static Napi::Value GetAudioApplications(const Napi::CallbackInfo& info) {
 // The native capture thread calls our lambda; we marshal PCM
 // data to the JS thread via Napi::ThreadSafeFunction.
 static Napi::ThreadSafeFunction g_tsfn;
+static Napi::ThreadSafeFunction g_statusTsfn;
 
 static Napi::Value StartCapture(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
 
-    if (info.Length() < 2 || !info[0].IsNumber() || !info[1].IsFunction()) {
-        Napi::TypeError::New(env, "startCapture(pid: number, callback: function)")
+    // Accept either:
+    //   startCapture(pid, dataCb)                         (legacy, INCLUDE)
+    //   startCapture(pid, mode, dataCb [, statusCb])      (new)
+    // mode is a string: "include" or "exclude"
+    if (info.Length() < 2 || !info[0].IsNumber()) {
+        Napi::TypeError::New(env, "startCapture(pid, [mode], dataCb, [statusCb])")
             .ThrowAsJavaScriptException();
         return env.Undefined();
     }
 
     uint32_t pid = info[0].As<Napi::Number>().Uint32Value();
-    Napi::Function jsCb = info[1].As<Napi::Function>();
+    haven::CaptureMode mode = haven::CaptureMode::IncludeProcess;
+    Napi::Function jsCb;
+    Napi::Function jsStatusCb;
+    bool haveStatusCb = false;
 
-    // Create a thread-safe function so the capture thread can post data
-    g_tsfn = Napi::ThreadSafeFunction::New(
-        env,
-        jsCb,
-        "HavenAudioCapture",
-        0,    // unlimited queue
-        1     // one thread
-    );
+    if (info[1].IsString()) {
+        std::string m = info[1].As<Napi::String>().Utf8Value();
+        if (m == "exclude") mode = haven::CaptureMode::ExcludeProcess;
+        if (info.Length() < 3 || !info[2].IsFunction()) {
+            Napi::TypeError::New(env, "startCapture(pid, mode, dataCb, [statusCb])")
+                .ThrowAsJavaScriptException();
+            return env.Undefined();
+        }
+        jsCb = info[2].As<Napi::Function>();
+        if (info.Length() >= 4 && info[3].IsFunction()) {
+            jsStatusCb = info[3].As<Napi::Function>();
+            haveStatusCb = true;
+        }
+    } else if (info[1].IsFunction()) {
+        jsCb = info[1].As<Napi::Function>();
+        if (info.Length() >= 3 && info[2].IsFunction()) {
+            jsStatusCb = info[2].As<Napi::Function>();
+            haveStatusCb = true;
+        }
+    } else {
+        Napi::TypeError::New(env, "startCapture: dataCb must be a function")
+            .ThrowAsJavaScriptException();
+        return env.Undefined();
+    }
 
-    // Capture callback → runs on native thread
+    g_tsfn = Napi::ThreadSafeFunction::New(env, jsCb, "HavenAudioCapture", 0, 1);
+    if (haveStatusCb) {
+        g_statusTsfn = Napi::ThreadSafeFunction::New(env, jsStatusCb, "HavenAudioStatus", 0, 1);
+    }
+
     haven::AudioDataCb nativeCb = [](const float* data, size_t count) {
-        // Copy the PCM data so it survives across threads
         float* copy = new float[count];
         std::memcpy(copy, data, count * sizeof(float));
 
         g_tsfn.NonBlockingCall(copy, [count](Napi::Env env, Napi::Function fn, float* buf) {
-            // Create a Float32Array and call the JS callback
             Napi::ArrayBuffer ab = Napi::ArrayBuffer::New(env, buf, count * sizeof(float),
                 [](Napi::Env, void* ptr) { delete[] static_cast<float*>(ptr); });
             Napi::Float32Array f32 = Napi::Float32Array::New(env, count, ab, 0);
@@ -83,26 +110,54 @@ static Napi::Value StartCapture(const Napi::CallbackInfo& info) {
         });
     };
 
-    bool ok = Cap()->StartCapture(pid, nativeCb);
-    if (!ok) {
-        g_tsfn.Release();
-        Napi::Error::New(env, "Failed to start capture for PID " + std::to_string(pid))
-            .ThrowAsJavaScriptException();
+    haven::CaptureStatusCb nativeStatusCb;
+    if (haveStatusCb) {
+        nativeStatusCb = [](const haven::CaptureStatus& s) {
+            // Box on heap so we can ferry across threads.
+            auto* boxed = new haven::CaptureStatus(s);
+            g_statusTsfn.NonBlockingCall(boxed,
+                [](Napi::Env env, Napi::Function fn, haven::CaptureStatus* st) {
+                    Napi::Object obj = Napi::Object::New(env);
+                    const char* k = "?";
+                    switch (st->kind) {
+                        case haven::CaptureStatusKind::Starting: k = "starting"; break;
+                        case haven::CaptureStatusKind::Started:  k = "started";  break;
+                        case haven::CaptureStatusKind::Failed:   k = "failed";   break;
+                        case haven::CaptureStatusKind::Stopped:  k = "stopped";  break;
+                    }
+                    obj.Set("kind",    Napi::String::New(env, k));
+                    obj.Set("message", Napi::String::New(env, st->message));
+                    obj.Set("code",    Napi::Number::New(env, (double)st->code));
+                    fn.Call({ obj });
+                    delete st;
+                });
+        };
     }
 
-    return env.Undefined();
+    bool ok = Cap()->StartCapture(pid, mode, nativeCb, nativeStatusCb);
+    if (!ok) {
+        if (g_tsfn)        { g_tsfn.Release();        g_tsfn = {}; }
+        if (g_statusTsfn)  { g_statusTsfn.Release();  g_statusTsfn = {}; }
+        // Don't throw — the status callback (if provided) already reported
+        // the reason. Returning false is sufficient and lets JS act on it.
+        return Napi::Boolean::New(env, false);
+    }
+
+    return Napi::Boolean::New(env, true);
 }
 
 // ── stopCapture() ──────────────────────────────────────────
 static Napi::Value StopCapture(const Napi::CallbackInfo& info) {
     Cap()->StopCapture();
-    if (g_tsfn) { g_tsfn.Release(); g_tsfn = {}; }
+    if (g_tsfn)       { g_tsfn.Release();       g_tsfn = {}; }
+    if (g_statusTsfn) { g_statusTsfn.Release(); g_statusTsfn = {}; }
     return info.Env().Undefined();
 }
 
 // ── cleanup() ──────────────────────────────────────────────
 static Napi::Value Cleanup(const Napi::CallbackInfo& info) {
-    if (g_tsfn) { g_tsfn.Release(); g_tsfn = {}; }
+    if (g_tsfn)       { g_tsfn.Release();       g_tsfn = {}; }
+    if (g_statusTsfn) { g_statusTsfn.Release(); g_statusTsfn = {}; }
     Cap()->Cleanup();
     return info.Env().Undefined();
 }
