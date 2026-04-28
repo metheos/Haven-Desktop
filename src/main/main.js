@@ -582,7 +582,14 @@ function ensureServerView(serverUrl, { background = false } = {}) {
           message: `The page at ${url} doesn't look like a Haven server.\n\nThis can happen if the server moved to a new address or the URL is wrong. Auto-returns home in 30 seconds.`,
         });
         if (timedOut) console.warn('[main] "Haven Not Found" dialog timed out, returning home');
-        if (response === 0) {
+        // Treat ANY answer that isn't an explicit "Keep Loading" (response 1)
+        // as "get me out of here" — including the X / Esc close which used to
+        // leave the user stranded on a non-Haven page with no UI to escape.
+        // For secondary servers, "Keep Loading" alone leaves them on the
+        // failed view; everything else snaps back to the primary so they're
+        // never frozen waiting on an infinite reconnect loop.
+        const wantsOut = response !== 1; // 0 / -1 / undefined / Esc
+        if (wantsOut) {
           if (isSecondary) {
             // Clean up the failed secondary view and return to primary
             mainWindow?.removeBrowserView(view);
@@ -622,7 +629,8 @@ function ensureServerView(serverUrl, { background = false } = {}) {
           message: `Haven couldn't load the server at ${url}.\n\nThis could mean the server is down, the address is wrong, or there's a network issue. Auto-returns home in 30 seconds.`,
         });
         if (timedOut) console.warn('[main] "Connection Problem" dialog timed out, returning home');
-        if (response === 0) {
+        const wantsOut = response !== 1; // 0 / -1 / undefined / Esc
+        if (wantsOut) {
           if (isSecondary) {
             mainWindow?.removeBrowserView(view);
             try { view.webContents.destroy(); } catch {}
@@ -738,6 +746,30 @@ function ensureServerView(serverUrl, { background = false } = {}) {
         const parsedOpen = new URL(openUrl);
         const parsedServer = new URL(url);
         if (parsedOpen.origin === parsedServer.origin) {
+          // ── Issue #5306: in-app navigation for Haven message/channel links ──
+          // A `target="_blank"` link to the same Haven server (e.g. the
+          // /app.html?channel=CODE&message=ID deep links produced by
+          // "Copy link to message") was opening a fresh BrowserWindow that
+          // boots a whole second client instance.  On Linux this surfaced
+          // as launching a new haven-desktop process.  Detect Haven app
+          // URLs (path starts with /app or carries a channel= query) and
+          // dispatch an IPC the renderer can react to without a full
+          // navigation, so the existing view scrolls to the message.
+          const isHavenAppLink =
+            /^\/(app(\.html)?|c\/[A-Za-z0-9]+)/.test(parsedOpen.pathname) ||
+            parsedOpen.searchParams.has('channel') ||
+            parsedOpen.searchParams.has('message');
+          if (isHavenAppLink) {
+            const code = parsedOpen.searchParams.get('channel') || '';
+            const messageId = parsedOpen.searchParams.get('message') || '';
+            try {
+              if (code) safeSend(view.webContents, 'app:navigate-deep-link', { code, messageId, url: openUrl });
+              else view.webContents.loadURL(openUrl);
+            } catch {
+              try { view.webContents.loadURL(openUrl); } catch {}
+            }
+            return { action: 'deny' };
+          }
           return {
             action: 'allow',
             overrideBrowserWindowOptions: {

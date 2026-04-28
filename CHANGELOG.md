@@ -1,5 +1,13 @@
 # Haven Desktop Changelog
 
+## v1.4.5
+
+### Fixed
+- **Clicking a Haven message link from one channel to another spawned a brand-new desktop client / second window** (issue #5306, surfaced on Linux).  `target="_blank"` deep-links to `/app.html?channel=…&message=…` were caught by `setWindowOpenHandler` and given `action: 'allow'` because they're same-origin, opening a fresh popup BrowserWindow.  We now detect Haven app deep-links specifically (path matches `/app(.html)?` or `/c/<code>`, or has `channel=`/`message=` query) and dispatch `app:navigate-deep-link` over IPC; the renderer hops to the channel and `_jumpToMessage`s in-place inside the existing view.  Game / asset pop-outs (e.g. `/games/foo.html`) still get a real child window.
+- **Defunct server lockup:** the "Haven Not Found" and "Connection Problem" dialogs only acted on the explicit "Go Back" button — clicking "Keep Loading" or closing the dialog with X / Esc left the user staring at a non-Haven page with no UI to escape, while the BrowserView's transient-error retry loop kept hammering the dead server.  Any answer that isn't an explicit "Keep Loading" (X close, Esc, default click-through) now snaps secondary servers back to the primary view, or kicks the user back to the welcome screen for the primary, so they're never frozen on an infinite reconnect.
+
+---
+
 ## v1.4.4
 
 ### Fixed

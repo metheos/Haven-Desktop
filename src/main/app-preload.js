@@ -1208,6 +1208,26 @@ ipcRenderer.on('notification-clicked', (_e, channelCode) => {
   }
 });
 
+// Issue #5306: in-app navigation for cross-channel message links
+// (target="_blank" on /app.html?channel=…&message=… would otherwise
+// spawn a fresh BrowserWindow / second client instance on Linux).
+ipcRenderer.on('app:navigate-deep-link', (_e, { code, messageId, url } = {}) => {
+  try {
+    if (code && window.app?.switchChannel) {
+      window.app.switchChannel(code);
+      if (messageId && window.app?._jumpToMessage) {
+        const id = parseInt(messageId, 10);
+        if (id) setTimeout(() => { try { window.app._jumpToMessage(id); } catch {} }, 600);
+      }
+      return;
+    }
+  } catch {}
+  // Fallback: full reload to the deep link if the SPA handlers aren't
+  // available (e.g. login page).  The page's auth.js preserves the
+  // ?channel/?message query across the auth bounce.
+  if (url) { try { location.href = url; } catch {} }
+});
+
 // ═══════════════════════════════════════════════════════════
 //  Exposed API  (window.havenDesktop)
 // ═══════════════════════════════════════════════════════════
