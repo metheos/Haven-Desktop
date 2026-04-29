@@ -1,5 +1,12 @@
 # Haven Desktop Changelog
 
+## v1.4.9
+
+### Fixed
+- **Per-app audio capture was failing on most Windows machines** (contributed by metheos, PR #27). `ActivateAudioInterfaceAsync` was returning `0x8000000E` because the `ActivateHandler` COM object didn't implement `IAgileObject`/`IMarshal`, so Windows couldn't marshal the async completion callback across thread contexts. The handler now registers a Free-Threaded Marshaler via `CoCreateFreeThreadedMarshaler`, which is required for WASAPI process loopback async activation to succeed. Additionally: startup synchronization replaced the old Win32 event handle + atomic bool with a proper `condition_variable` + state enum (timeout extended 4s to 12s); the N-API PCM callback now copies audio data into JS-owned `ArrayBuffer` memory to eliminate external buffer ownership hazards; `main.js` adds a `safeCallback` guard to prevent double-invoke of the `DisplayMedia` callback, retries `desktopCapturer.getSources` without thumbnails when WGC init fails on some Windows builds, and uses a `requestId` to prevent stale picker responses from resolving the wrong share request.
+
+---
+
 ## v1.4.8
 
 ### Fixed
