@@ -662,14 +662,14 @@ ipcRenderer.on('audio:capture-data', (_event, pcmData) => {
 
 // ─── Listen for screen-picker request from main process ──
 ipcRenderer.on('screen:show-picker', (_event, data) => {
-  showScreenPicker(data.sources, data.audioApps);
+  showScreenPicker(data?.sources || [], data?.audioApps || [], data?.requestId || null);
 });
 
 // ═══════════════════════════════════════════════════════════
 // Screen-Share Picker  (injected as a full-screen overlay)
 // ═══════════════════════════════════════════════════════════
 
-function showScreenPicker(sources, audioApps) {
+function showScreenPicker(sources, audioApps, requestId) {
   // Remove stale picker
   document.getElementById('haven-screen-picker')?.remove();
 
@@ -698,6 +698,9 @@ function showScreenPicker(sources, audioApps) {
       .hsp-src.sel{border-color:#6b4fdb}
       .hsp-src img{width:100%;border-radius:4px;margin-bottom:6px;aspect-ratio:16/9;
         object-fit:cover;background:#0d0d1a}
+      .hsp-src .hsp-thumb-ph{width:100%;border-radius:4px;margin-bottom:6px;aspect-ratio:16/9;
+        background:linear-gradient(135deg,#0d0d1a,#1a1a2e);display:flex;align-items:center;
+        justify-content:center;color:#777;font-size:11px;letter-spacing:.3px}
       .hsp-src-name{color:#ccc;font-size:12px;text-align:center;white-space:nowrap;
         overflow:hidden;text-overflow:ellipsis}
       .hsp-audio{padding-top:14px;border-top:1px solid #2a2a4a;flex-shrink:0;margin-top:10px}
@@ -757,7 +760,10 @@ function showScreenPicker(sources, audioApps) {
   sources.forEach(src => {
     const el = document.createElement('div');
     el.className = 'hsp-src';
-    el.innerHTML = `<img src="${src.thumbnail}" alt=""><div class="hsp-src-name" title="${src.name}">${src.name}</div>`;
+    const preview = src.thumbnail
+      ? `<img src="${src.thumbnail}" alt="">`
+      : `<div class="hsp-thumb-ph">No preview</div>`;
+    el.innerHTML = `${preview}<div class="hsp-src-name" title="${src.name}">${src.name}</div>`;
     el.onclick = () => {
       overlay.querySelectorAll('.hsp-src.sel').forEach(s => s.classList.remove('sel'));
       el.classList.add('sel');
@@ -846,7 +852,9 @@ function showScreenPicker(sources, audioApps) {
       }
     }
 
-    ipcRenderer.send('screen:picker-result', cancelled ? { cancelled: true } : { sourceId: selSource, audioAppPid: effectiveAudioPid });
+    ipcRenderer.send('screen:picker-result', cancelled
+      ? { requestId, cancelled: true }
+      : { requestId, sourceId: selSource, audioAppPid: effectiveAudioPid });
   };
 
   document.getElementById('hsp-cancel').onclick = () => dismiss(true);
