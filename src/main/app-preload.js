@@ -662,14 +662,14 @@ ipcRenderer.on('audio:capture-data', (_event, pcmData) => {
 
 // ─── Listen for screen-picker request from main process ──
 ipcRenderer.on('screen:show-picker', (_event, data) => {
-  showScreenPicker(data.sources, data.audioApps);
+  showScreenPicker(data?.sources || [], data?.audioApps || [], data?.requestId || null);
 });
 
 // ═══════════════════════════════════════════════════════════
 // Screen-Share Picker  (injected as a full-screen overlay)
 // ═══════════════════════════════════════════════════════════
 
-function showScreenPicker(sources, audioApps) {
+function showScreenPicker(sources, audioApps, requestId) {
   // Remove stale picker
   document.getElementById('haven-screen-picker')?.remove();
 
@@ -698,6 +698,9 @@ function showScreenPicker(sources, audioApps) {
       .hsp-src.sel{border-color:#6b4fdb}
       .hsp-src img{width:100%;border-radius:4px;margin-bottom:6px;aspect-ratio:16/9;
         object-fit:cover;background:#0d0d1a}
+      .hsp-src .hsp-thumb-ph{width:100%;border-radius:4px;margin-bottom:6px;aspect-ratio:16/9;
+        background:linear-gradient(135deg,#0d0d1a,#1a1a2e);display:flex;align-items:center;
+        justify-content:center;color:#777;font-size:11px;letter-spacing:.3px}
       .hsp-src-name{color:#ccc;font-size:12px;text-align:center;white-space:nowrap;
         overflow:hidden;text-overflow:ellipsis}
       .hsp-audio{padding-top:14px;border-top:1px solid #2a2a4a;flex-shrink:0;margin-top:10px}
@@ -757,7 +760,10 @@ function showScreenPicker(sources, audioApps) {
   sources.forEach(src => {
     const el = document.createElement('div');
     el.className = 'hsp-src';
-    el.innerHTML = `<img src="${src.thumbnail}" alt=""><div class="hsp-src-name" title="${src.name}">${src.name}</div>`;
+    const preview = src.thumbnail
+      ? `<img src="${src.thumbnail}" alt="">`
+      : `<div class="hsp-thumb-ph">No preview</div>`;
+    el.innerHTML = `${preview}<div class="hsp-src-name" title="${src.name}">${src.name}</div>`;
     el.onclick = () => {
       overlay.querySelectorAll('.hsp-src.sel').forEach(s => s.classList.remove('sel'));
       el.classList.add('sel');
@@ -846,7 +852,9 @@ function showScreenPicker(sources, audioApps) {
       }
     }
 
-    ipcRenderer.send('screen:picker-result', cancelled ? { cancelled: true } : { sourceId: selSource, audioAppPid: effectiveAudioPid });
+    ipcRenderer.send('screen:picker-result', cancelled
+      ? { requestId, cancelled: true }
+      : { requestId, sourceId: selSource, audioAppPid: effectiveAudioPid });
   };
 
   document.getElementById('hsp-cancel').onclick = () => dismiss(true);
@@ -1138,7 +1146,31 @@ function installGetDisplayMediaOverride() {
           console.log(`[Haven Desktop] waiting for first PCM packet... elapsed=${Date.now() - start}ms received=${_audioPacketsReceived} status=${_lastNativeStatus?.kind || 'none'}`);
         }
         await new Promise(resolve => setTimeout(resolve, stepMs));
-      }\n\n      if (_audioPacketsReceived > 0 && window._havenAppAudioTrack) {\n        // Native pipeline succeeded \u2014 NOW it's safe to drop Electron's\n        // loopback and substitute the clean per-app / exclude-mode track.\n        stream.getAudioTracks().forEach(t => { try { stream.removeTrack(t); t.stop(); } catch {} });\n        stream.addTrack(window._havenAppAudioTrack);\n        console.log(`[Haven Desktop] per-app/system-exclude audio track added (waited ${Date.now() - start}ms, ${_audioPacketsReceived} PCM chunks received)`);\n      } else {\n        // Native capture failed.  KEEP Electron's loopback track so the\n        // share is audible.  Yes, this can include Haven's own voice\n        // output (echo risk) but silence is worse \u2014 the share-audio-mode\n        // badge / toast will already warn the user.\n        console.warn('[Haven Desktop] readiness wait expired without PCM. Diagnostics:');\n        console.warn('  capturedAudioPid:', _capturedAudioPid);\n        console.warn('  packetsReceived:', _audioPacketsReceived);\n        console.warn('  ipcDataCount:', _ipcDataCount);\n        console.warn('  havenAppAudioTrack present:', !!window._havenAppAudioTrack);\n        console.warn('  audioCtx state:', _audioCtx?.state);\n        console.warn('  audioWorkletNode present:', !!_audioWorkletNode);\n        console.warn('  havenAppAudioPush present:', !!window._havenAppAudioPush);\n        console.warn('  lastNativeStatus:', _lastNativeStatus);\n        console.warn('  Falling back to Electron loopback audio so share isn\\'t silent (Haven voice loop possible).');\n      }\n    } else if (window._havenAppAudioTrack) {
+      }
+
+      if (_audioPacketsReceived > 0 && window._havenAppAudioTrack) {
+        // Native pipeline succeeded — NOW it's safe to drop Electron's
+        // loopback and substitute the clean per-app / exclude-mode track.
+        stream.getAudioTracks().forEach(t => { try { stream.removeTrack(t); t.stop(); } catch {} });
+        stream.addTrack(window._havenAppAudioTrack);
+        console.log(`[Haven Desktop] per-app/system-exclude audio track added (waited ${Date.now() - start}ms, ${_audioPacketsReceived} PCM chunks received)`);
+      } else {
+        // Native capture failed.  KEEP Electron's loopback track so the
+        // share is audible.  Yes, this can include Haven's own voice
+        // output (echo risk) but silence is worse — the share-audio-mode
+        // badge / toast will already warn the user.
+        console.warn('[Haven Desktop] readiness wait expired without PCM. Diagnostics:');
+        console.warn('  capturedAudioPid:', _capturedAudioPid);
+        console.warn('  packetsReceived:', _audioPacketsReceived);
+        console.warn('  ipcDataCount:', _ipcDataCount);
+        console.warn('  havenAppAudioTrack present:', !!window._havenAppAudioTrack);
+        console.warn('  audioCtx state:', _audioCtx?.state);
+        console.warn('  audioWorkletNode present:', !!_audioWorkletNode);
+        console.warn('  havenAppAudioPush present:', !!window._havenAppAudioPush);
+        console.warn('  lastNativeStatus:', _lastNativeStatus);
+        console.warn('  Falling back to Electron loopback audio so share isn\'t silent (Haven voice loop possible).');
+      }
+    } else if (window._havenAppAudioTrack) {
       // Defensive: a per-app track exists but no _capturedAudioPid was set.
       // Prefer per-app over loopback to be safe.
       stream.getAudioTracks().forEach(t => { try { stream.removeTrack(t); t.stop(); } catch {} });

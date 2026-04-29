@@ -1250,13 +1250,35 @@ function createTray() {
 
 function registerScreenShareHandler() {
   session.defaultSession.setDisplayMediaRequestHandler(async (request, callback) => {
+    let callbackUsed = false;
+    const safeCallback = (payload) => {
+      if (callbackUsed) {
+        console.warn('[ScreenShare] callback already used; ignoring duplicate invoke');
+        return;
+      }
+      callbackUsed = true;
+      callback(payload);
+    };
+
     try {
       // Video sources
-      const sources = await desktopCapturer.getSources({
-        types: ['window', 'screen'],
-        thumbnailSize: { width: 320, height: 180 },
-        fetchWindowIcons: true,
-      });
+      let sources;
+      try {
+        sources = await desktopCapturer.getSources({
+          types: ['window', 'screen'],
+          thumbnailSize: { width: 320, height: 180 },
+          fetchWindowIcons: true,
+        });
+      } catch (err) {
+        // Some Windows builds intermittently fail WGC thumbnail startup
+        // with E_INVALIDARG. Retry without thumbnails so the picker can open.
+        console.warn(`[ScreenShare] getSources(thumbnails) failed: ${err.message}; retrying without thumbnails`);
+        sources = await desktopCapturer.getSources({
+          types: ['window', 'screen'],
+          thumbnailSize: { width: 0, height: 0 },
+          fetchWindowIcons: false,
+        });
+      }
 
       // Audio-producing applications (native addon)
       let audioApps = [];
@@ -1266,28 +1288,55 @@ function registerScreenShareHandler() {
       const sourceData = sources.map(s => ({
         id:         s.id,
         name:       s.name,
-        thumbnail:  s.thumbnail.toDataURL(),
+        thumbnail:  (s.thumbnail && !s.thumbnail.isEmpty()) ? s.thumbnail.toDataURL() : null,
         appIcon:    s.appIcon ? s.appIcon.toDataURL() : null,
         display_id: s.display_id,
       }));
+      console.log(`[ScreenShare] source enumeration complete: ${sourceData.length} source(s)`);
 
-      const targetContents = getActiveContents();
-      if (!targetContents) { callback({}); return; }
+      const requestFrame = request?.frame;
+      const targetContents = requestFrame?.host || getActiveContents();
+      if (!targetContents) { safeCallback({}); return; }
+
+      const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
       // Ask renderer to show the picker
-      safeSend(targetContents, 'screen:show-picker', { sources: sourceData, audioApps });
+      let sentToFrame = false;
+      if (requestFrame && !requestFrame.isDestroyed()) {
+        try {
+          requestFrame.send('screen:show-picker', { requestId, sources: sourceData, audioApps });
+          sentToFrame = true;
+          console.log('[ScreenShare] picker request sent to request.frame');
+        } catch (err) {
+          console.warn(`[ScreenShare] request.frame send failed: ${err.message}`);
+        }
+      }
+      const frameHostId = requestFrame?.host?.id;
+      const targetId = targetContents?.id;
+      if (!sentToFrame || frameHostId !== targetId) {
+        safeSend(targetContents, 'screen:show-picker', { requestId, sources: sourceData, audioApps });
+        console.log('[ScreenShare] picker request sent to target webContents fallback');
+      }
 
       // Wait for picker result (or 60 s timeout)
       const result = await new Promise(resolve => {
-        const handler = (_e, res) => resolve(res);
-        ipcMain.once('screen:picker-result', handler);
-        setTimeout(() => { ipcMain.removeListener('screen:picker-result', handler); resolve({ cancelled: true }); }, 60000);
+        const handler = (_e, res = {}) => {
+          if (res.requestId !== requestId) return;
+          clearTimeout(timeoutId);
+          ipcMain.removeListener('screen:picker-result', handler);
+          resolve(res);
+        };
+        const timeoutId = setTimeout(() => {
+          ipcMain.removeListener('screen:picker-result', handler);
+          resolve({ cancelled: true, requestId });
+        }, 60000);
+        ipcMain.on('screen:picker-result', handler);
       });
 
-      if (result.cancelled) { callback({}); return; }
+      if (result.cancelled) { safeCallback({}); return; }
 
       const selected = sources.find(s => s.id === result.sourceId);
-      if (!selected) { callback({}); return; }
+      if (!selected) { safeCallback({}); return; }
 
       // Decide capture path based on picker result.
       //   audioAppPid > 0  → INCLUDE-mode capture of that PID
@@ -1403,14 +1452,14 @@ function registerScreenShareHandler() {
       //   alternative is users wondering why no one can hear their game.
       //   The renderer toast / share-mode badge will warn them.
       if (appliedMode === 'none') {
-        callback({ video: selected });
+        safeCallback({ video: selected });
       } else {
-        callback({ video: selected, audio: 'loopback' });
+        safeCallback({ video: selected, audio: 'loopback' });
       }
 
     } catch (err) {
       console.error('[ScreenShare] handler error:', err);
-      callback({});
+      safeCallback({});
     }
   });
 }
