@@ -1114,13 +1114,14 @@ function installGetDisplayMediaOverride() {
     console.log(`[Haven Desktop] getDisplayMedia resolved (capturedAudioPid=${_capturedAudioPid}, electron-audio-tracks=${audioTracksFromElectron}, per-app track ready=${!!window._havenAppAudioTrack})`);
 
     // If a native capture was requested (per-app PID OR 'system' exclude-mode),
-    // wait for the first PCM packet to land, then add the per-app track.
+    // wait for the first PCM packet to land.  IF AND ONLY IF native PCM
+    // arrives, we strip Electron's loopback track and substitute the per-app
+    // PCM track.  If PCM never arrives we leave Electron's loopback track in
+    // place so the share has *some* audio \u2014 silent shares are the worse UX
+    // (per user feedback after the per-app overhaul: many Windows installs
+    // hit ActivateAudioInterfaceAsync E_INVALIDARG / E_NOT_IMPLEMENTED on
+    // the WASAPI Process Loopback API, leaving every share dead-silent).
     if (_capturedAudioPid) {
-      // For per-app captures: drop any audio tracks Electron may have
-      // included (we asked for video-only but be defensive).
-      // For 'system' exclude-mode: same — main asked for video-only.
-      stream.getAudioTracks().forEach(t => { try { stream.removeTrack(t); t.stop(); } catch {} });
-
       const timeoutMs = 8000;
       const stepMs    = 100;
       const start     = Date.now();
@@ -1129,7 +1130,7 @@ function installGetDisplayMediaOverride() {
         if (_audioPacketsReceived > 0) break;
         // Abort early on hard failure from native side.
         if (_lastNativeStatus && _lastNativeStatus.kind === 'failed') {
-          console.warn(`[Haven Desktop] native capture reported FAILED during readiness wait — aborting wait`);
+          console.warn(`[Haven Desktop] native capture reported FAILED during readiness wait \u2014 keeping Electron loopback so share isn't silent`);
           break;
         }
         if (Date.now() - lastLog > 1000) {
@@ -1137,30 +1138,7 @@ function installGetDisplayMediaOverride() {
           console.log(`[Haven Desktop] waiting for first PCM packet... elapsed=${Date.now() - start}ms received=${_audioPacketsReceived} status=${_lastNativeStatus?.kind || 'none'}`);
         }
         await new Promise(resolve => setTimeout(resolve, stepMs));
-      }
-
-      if (_audioPacketsReceived > 0 && window._havenAppAudioTrack) {
-        stream.addTrack(window._havenAppAudioTrack);
-        console.log(`[Haven Desktop] per-app/system-exclude audio track added (waited ${Date.now() - start}ms, ${_audioPacketsReceived} PCM chunks received)`);
-      } else {
-        // No PCM arrived. We do NOT silently substitute system loopback —
-        // that's the bug from issue #5305. Either:
-        //   - native init failed (we logged it above), or
-        //   - the renderer-side AudioWorklet pipeline isn't pumping
-        //   - the IPC channel between main and renderer dropped packets
-        // Diagnostics dump:
-        console.warn('[Haven Desktop] readiness wait expired without PCM. Diagnostics:');
-        console.warn('  capturedAudioPid:', _capturedAudioPid);
-        console.warn('  packetsReceived:', _audioPacketsReceived);
-        console.warn('  ipcDataCount:', _ipcDataCount);
-        console.warn('  havenAppAudioTrack present:', !!window._havenAppAudioTrack);
-        console.warn('  audioCtx state:', _audioCtx?.state);
-        console.warn('  audioWorkletNode present:', !!_audioWorkletNode);
-        console.warn('  havenAppAudioPush present:', !!window._havenAppAudioPush);
-        console.warn('  lastNativeStatus:', _lastNativeStatus);
-        console.warn('  Share will be SILENT (no system-loopback fallback to avoid voice loop).');
-      }
-    } else if (window._havenAppAudioTrack) {
+      }\n\n      if (_audioPacketsReceived > 0 && window._havenAppAudioTrack) {\n        // Native pipeline succeeded \u2014 NOW it's safe to drop Electron's\n        // loopback and substitute the clean per-app / exclude-mode track.\n        stream.getAudioTracks().forEach(t => { try { stream.removeTrack(t); t.stop(); } catch {} });\n        stream.addTrack(window._havenAppAudioTrack);\n        console.log(`[Haven Desktop] per-app/system-exclude audio track added (waited ${Date.now() - start}ms, ${_audioPacketsReceived} PCM chunks received)`);\n      } else {\n        // Native capture failed.  KEEP Electron's loopback track so the\n        // share is audible.  Yes, this can include Haven's own voice\n        // output (echo risk) but silence is worse \u2014 the share-audio-mode\n        // badge / toast will already warn the user.\n        console.warn('[Haven Desktop] readiness wait expired without PCM. Diagnostics:');\n        console.warn('  capturedAudioPid:', _capturedAudioPid);\n        console.warn('  packetsReceived:', _audioPacketsReceived);\n        console.warn('  ipcDataCount:', _ipcDataCount);\n        console.warn('  havenAppAudioTrack present:', !!window._havenAppAudioTrack);\n        console.warn('  audioCtx state:', _audioCtx?.state);\n        console.warn('  audioWorkletNode present:', !!_audioWorkletNode);\n        console.warn('  havenAppAudioPush present:', !!window._havenAppAudioPush);\n        console.warn('  lastNativeStatus:', _lastNativeStatus);\n        console.warn('  Falling back to Electron loopback audio so share isn\\'t silent (Haven voice loop possible).');\n      }\n    } else if (window._havenAppAudioTrack) {
       // Defensive: a per-app track exists but no _capturedAudioPid was set.
       // Prefer per-app over loopback to be safe.
       stream.getAudioTracks().forEach(t => { try { stream.removeTrack(t); t.stop(); } catch {} });

@@ -1390,18 +1390,22 @@ function registerScreenShareHandler() {
       });
 
       // Audio routing for the share:
-      //   • usePerAppAudio: video-only from Electron; renderer attaches the
-      //     native PCM track via MediaStreamDestination.
-      //   • appliedMode === 'system-loopback': last-ditch Electron loopback.
-      //   • appliedMode === 'none': silent share.
-      if (usePerAppAudio) {
+      //   We ALWAYS request Electron loopback audio when *any* audio mode
+      //   was requested (per-app, system, or legacy).  The renderer's
+      //   getDisplayMedia override decides at the last moment whether to
+      //   strip that loopback track and replace it with the native PCM
+      //   track.  If native PCM never arrives (e.g. WASAPI process loopback
+      //   API is unavailable on this Windows build, as on issue #5305
+      //   reporters running older 19041 builds without the loopback API)
+      //   the override keeps Electron's loopback track, so the share is
+      //   audible instead of silently dropping audio.  Yes, that means a
+      //   small risk of Haven voice loop in the fallback path — the
+      //   alternative is users wondering why no one can hear their game.
+      //   The renderer toast / share-mode badge will warn them.
+      if (appliedMode === 'none') {
         callback({ video: selected });
-      } else if (appliedMode === 'system-loopback') {
-        console.warn('[ScreenShare] using Electron system-loopback (last-resort fallback; may include Haven voice)');
-        callback({ video: selected, audio: 'loopback' });
       } else {
-        // 'none' — explicit silent share.
-        callback({ video: selected });
+        callback({ video: selected, audio: 'loopback' });
       }
 
     } catch (err) {

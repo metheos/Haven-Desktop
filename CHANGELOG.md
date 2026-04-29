@@ -1,5 +1,12 @@
 # Haven Desktop Changelog
 
+## v1.4.7
+
+### Fixed
+- **Silent screen shares on machines where Windows Process Loopback API is unavailable.** When per-app or system-clean capture failed (`ActivateAudioInterfaceAsync` returning `E_INVALIDARG` etc.), the `getDisplayMedia` override stripped Electron's loopback audio track up front and then sat waiting for native PCM that never came, leaving every share dead-silent. Main now always asks Electron for a loopback track when any audio mode is selected, and the override only strips it after native PCM is confirmed flowing. Native failure now keeps Electron loopback so the share is at least audible (with a console warning that Haven voice may echo — the share-mode badge already surfaces this state).
+
+---
+
 ## v1.4.6
 
 ### Fixed
