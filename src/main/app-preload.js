@@ -1130,7 +1130,7 @@ function installGetDisplayMediaOverride() {
         if (_audioPacketsReceived > 0) break;
         // Abort early on hard failure from native side.
         if (_lastNativeStatus && _lastNativeStatus.kind === 'failed') {
-          console.warn(`[Haven Desktop] native capture reported FAILED during readiness wait \u2014 keeping Electron loopback so share isn't silent`);
+          console.warn(`[Haven Desktop] native capture reported FAILED during readiness wait — keeping Electron loopback so share isn't silent`);
           break;
         }
         if (Date.now() - lastLog > 1000) {
@@ -1138,7 +1138,31 @@ function installGetDisplayMediaOverride() {
           console.log(`[Haven Desktop] waiting for first PCM packet... elapsed=${Date.now() - start}ms received=${_audioPacketsReceived} status=${_lastNativeStatus?.kind || 'none'}`);
         }
         await new Promise(resolve => setTimeout(resolve, stepMs));
-      }\n\n      if (_audioPacketsReceived > 0 && window._havenAppAudioTrack) {\n        // Native pipeline succeeded \u2014 NOW it's safe to drop Electron's\n        // loopback and substitute the clean per-app / exclude-mode track.\n        stream.getAudioTracks().forEach(t => { try { stream.removeTrack(t); t.stop(); } catch {} });\n        stream.addTrack(window._havenAppAudioTrack);\n        console.log(`[Haven Desktop] per-app/system-exclude audio track added (waited ${Date.now() - start}ms, ${_audioPacketsReceived} PCM chunks received)`);\n      } else {\n        // Native capture failed.  KEEP Electron's loopback track so the\n        // share is audible.  Yes, this can include Haven's own voice\n        // output (echo risk) but silence is worse \u2014 the share-audio-mode\n        // badge / toast will already warn the user.\n        console.warn('[Haven Desktop] readiness wait expired without PCM. Diagnostics:');\n        console.warn('  capturedAudioPid:', _capturedAudioPid);\n        console.warn('  packetsReceived:', _audioPacketsReceived);\n        console.warn('  ipcDataCount:', _ipcDataCount);\n        console.warn('  havenAppAudioTrack present:', !!window._havenAppAudioTrack);\n        console.warn('  audioCtx state:', _audioCtx?.state);\n        console.warn('  audioWorkletNode present:', !!_audioWorkletNode);\n        console.warn('  havenAppAudioPush present:', !!window._havenAppAudioPush);\n        console.warn('  lastNativeStatus:', _lastNativeStatus);\n        console.warn('  Falling back to Electron loopback audio so share isn\\'t silent (Haven voice loop possible).');\n      }\n    } else if (window._havenAppAudioTrack) {
+      }
+
+      if (_audioPacketsReceived > 0 && window._havenAppAudioTrack) {
+        // Native pipeline succeeded — NOW it's safe to drop Electron's
+        // loopback and substitute the clean per-app / exclude-mode track.
+        stream.getAudioTracks().forEach(t => { try { stream.removeTrack(t); t.stop(); } catch {} });
+        stream.addTrack(window._havenAppAudioTrack);
+        console.log(`[Haven Desktop] per-app/system-exclude audio track added (waited ${Date.now() - start}ms, ${_audioPacketsReceived} PCM chunks received)`);
+      } else {
+        // Native capture failed.  KEEP Electron's loopback track so the
+        // share is audible.  Yes, this can include Haven's own voice
+        // output (echo risk) but silence is worse — the share-audio-mode
+        // badge / toast will already warn the user.
+        console.warn('[Haven Desktop] readiness wait expired without PCM. Diagnostics:');
+        console.warn('  capturedAudioPid:', _capturedAudioPid);
+        console.warn('  packetsReceived:', _audioPacketsReceived);
+        console.warn('  ipcDataCount:', _ipcDataCount);
+        console.warn('  havenAppAudioTrack present:', !!window._havenAppAudioTrack);
+        console.warn('  audioCtx state:', _audioCtx?.state);
+        console.warn('  audioWorkletNode present:', !!_audioWorkletNode);
+        console.warn('  havenAppAudioPush present:', !!window._havenAppAudioPush);
+        console.warn('  lastNativeStatus:', _lastNativeStatus);
+        console.warn("  Falling back to Electron loopback audio so share isn't silent (Haven voice loop possible).");
+      }
+    } else if (window._havenAppAudioTrack) {
       // Defensive: a per-app track exists but no _capturedAudioPid was set.
       // Prefer per-app over loopback to be safe.
       stream.getAudioTracks().forEach(t => { try { stream.removeTrack(t); t.stop(); } catch {} });

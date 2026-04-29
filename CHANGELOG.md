@@ -1,5 +1,12 @@
 # Haven Desktop Changelog
 
+## v1.4.8
+
+### Fixed
+- **Screen share completely broken — clicking the screen-share button did nothing, no picker, no error.** The 1.4.7 release shipped `src/main/app-preload.js` with literal `\n`, `\u2014`, and `\\'` escape sequences embedded in the source of the `installGetDisplayMediaOverride()` function instead of actual newlines, em-dashes, and a quote. That made the whole preload a JavaScript syntax error, so it never loaded — no `screen:show-picker` IPC listener, no `getDisplayMedia` override, no notifications override, nothing. Main would fire the picker IPC, the renderer would never respond, main would silently time out after 60 seconds and reject the call. Restored the block to valid JS.
+
+---
+
 ## v1.4.7
 
 ### Fixed
