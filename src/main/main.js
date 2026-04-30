@@ -512,6 +512,13 @@ function ensureServerView(serverUrl, { background = false } = {}) {
         nodeIntegration: false,
         sandbox: false,
         webSecurity: true,
+        // Prevent Chromium from suspending AudioContext and throttling timers
+        // when the window is minimised or loses focus.  Without this the
+        // _startAnalyser / _startLocalTalkDetection setIntervals are coalesced
+        // to 1-second buckets and the AudioContext is auto-suspended, which
+        // makes voice-activity indicators go dark until the window is restored
+        // AND the AudioContext is explicitly resumed.
+        backgroundThrottling: false,
       },
     });
     mainWindow.addBrowserView(view);

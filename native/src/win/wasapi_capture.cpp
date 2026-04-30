@@ -179,74 +179,87 @@ bool WasapiCapture::IsSupported() const {
 std::vector<AudioApp> WasapiCapture::GetAudioApplications() {
     std::vector<AudioApp> result;
 
+    // Track PIDs we've already seen across all endpoints (avoid duplicates)
+    std::vector<DWORD> seen;
+    DWORD ourPid = GetCurrentProcessId();
+
     IMMDeviceEnumerator* enumerator = nullptr;
     HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
         CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), (void**)&enumerator);
     if (FAILED(hr)) return result;
 
-    IMMDevice* device = nullptr;
-    hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
+    // Enumerate ALL active render endpoints, not just the default console one.
+    // Some engines (MonoGame/XNA, FMOD, OpenAL) register audio sessions on a
+    // non-default or non-console endpoint, so querying only eConsole misses them.
+    IMMDeviceCollection* devices = nullptr;
+    hr = enumerator->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &devices);
     if (FAILED(hr)) { enumerator->Release(); return result; }
 
-    IAudioSessionManager2* mgr = nullptr;
-    hr = device->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr, (void**)&mgr);
-    if (FAILED(hr)) { device->Release(); enumerator->Release(); return result; }
+    UINT numDevices = 0;
+    devices->GetCount(&numDevices);
 
-    IAudioSessionEnumerator* sessions = nullptr;
-    hr = mgr->GetSessionEnumerator(&sessions);
-    if (FAILED(hr)) { mgr->Release(); device->Release(); enumerator->Release(); return result; }
+    for (UINT d = 0; d < numDevices; d++) {
+        IMMDevice* device = nullptr;
+        if (FAILED(devices->Item(d, &device))) continue;
 
-    int count = 0;
-    sessions->GetCount(&count);
+        IAudioSessionManager2* mgr = nullptr;
+        hr = device->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr, (void**)&mgr);
+        device->Release();
+        if (FAILED(hr)) continue;
 
-    // Track PIDs we've already seen (avoid duplicates)
-    std::vector<DWORD> seen;
-    DWORD ourPid = GetCurrentProcessId();
+        IAudioSessionEnumerator* sessions = nullptr;
+        hr = mgr->GetSessionEnumerator(&sessions);
+        mgr->Release();
+        if (FAILED(hr)) continue;
 
-    for (int i = 0; i < count; i++) {
-        IAudioSessionControl* ctrl = nullptr;
-        if (FAILED(sessions->GetSession(i, &ctrl))) continue;
+        int count = 0;
+        sessions->GetCount(&count);
 
-        IAudioSessionControl2* ctrl2 = nullptr;
-        if (FAILED(ctrl->QueryInterface(__uuidof(IAudioSessionControl2), (void**)&ctrl2))) {
-            ctrl->Release(); continue;
+        for (int i = 0; i < count; i++) {
+            IAudioSessionControl* ctrl = nullptr;
+            if (FAILED(sessions->GetSession(i, &ctrl))) continue;
+
+            IAudioSessionControl2* ctrl2 = nullptr;
+            if (FAILED(ctrl->QueryInterface(__uuidof(IAudioSessionControl2), (void**)&ctrl2))) {
+                ctrl->Release(); continue;
+            }
+
+            // Skip system sounds and Haven Desktop itself (sharing our own
+            // audio just creates a feedback loop — see issue #5305).
+            if (ctrl2->IsSystemSoundsSession() == S_OK) {
+                ctrl2->Release(); ctrl->Release(); continue;
+            }
+
+            DWORD pid = 0;
+            ctrl2->GetProcessId(&pid);
+            if (pid == 0 || pid == ourPid ||
+                std::find(seen.begin(), seen.end(), pid) != seen.end()) {
+                ctrl2->Release(); ctrl->Release(); continue;
+            }
+            seen.push_back(pid);
+
+            AudioSessionState state = AudioSessionStateInactive;
+            ctrl->GetState(&state);
+
+            AudioApp app;
+            app.pid    = pid;
+            app.name   = ProcessNameFromPid(pid);
+            app.active = (state == AudioSessionStateActive);
+            // Skip sessions for processes we can't even name — usually short-lived
+            // helpers that already exited.
+            if (app.name == "Unknown") {
+                ctrl2->Release(); ctrl->Release(); continue;
+            }
+            result.push_back(app);
+
+            ctrl2->Release();
+            ctrl->Release();
         }
 
-        // Skip system sounds and Haven Desktop itself (sharing our own
-        // audio just creates a feedback loop — see issue #5305).
-        if (ctrl2->IsSystemSoundsSession() == S_OK) {
-            ctrl2->Release(); ctrl->Release(); continue;
-        }
-
-        DWORD pid = 0;
-        ctrl2->GetProcessId(&pid);
-        if (pid == 0 || pid == ourPid ||
-            std::find(seen.begin(), seen.end(), pid) != seen.end()) {
-            ctrl2->Release(); ctrl->Release(); continue;
-        }
-        seen.push_back(pid);
-
-        AudioSessionState state = AudioSessionStateInactive;
-        ctrl->GetState(&state);
-
-        AudioApp app;
-        app.pid    = pid;
-        app.name   = ProcessNameFromPid(pid);
-        app.active = (state == AudioSessionStateActive);
-        // Skip sessions for processes we can't even name — usually short-lived
-        // helpers that already exited.
-        if (app.name == "Unknown") {
-            ctrl2->Release(); ctrl->Release(); continue;
-        }
-        result.push_back(app);
-
-        ctrl2->Release();
-        ctrl->Release();
+        sessions->Release();
     }
 
-    sessions->Release();
-    mgr->Release();
-    device->Release();
+    devices->Release();
     enumerator->Release();
 
     return result;

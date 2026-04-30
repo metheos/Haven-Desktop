@@ -1,5 +1,12 @@
 # Haven Desktop Changelog
 
+## v1.4.10
+
+### Fixed
+- **Per-app audio: game audio apps sometimes not appearing in the audio picker** (e.g. Terraria). The audio app enumeration was only querying the default console audio endpoint (`eConsole`). Engines like MonoGame/XNA (Terraria), FMOD, and OpenAL can register their audio sessions on a different render endpoint, so those apps were invisible in the picker. Enumeration now iterates all active render endpoints via `IMMDeviceEnumerator::EnumAudioEndpoints`, with per-PID deduplication across endpoints.
+
+---
+
 ## v1.4.9
 
 ### Fixed
