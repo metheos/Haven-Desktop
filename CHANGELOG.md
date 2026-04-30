@@ -4,6 +4,7 @@
 
 ### Fixed
 - **Per-app audio: game audio apps sometimes not appearing in the audio picker** (e.g. Terraria). The audio app enumeration was only querying the default console audio endpoint (`eConsole`). Engines like MonoGame/XNA (Terraria), FMOD, and OpenAL can register their audio sessions on a different render endpoint, so those apps were invisible in the picker. Enumeration now iterates all active render endpoints via `IMMDeviceEnumerator::EnumAudioEndpoints`, with per-PID deduplication across endpoints.
+- **Voice activity indicators go dark when Haven is minimized.** Chromium was throttling `setInterval` calls and auto-suspending the `AudioContext` when the window lost focus, making mic/voice indicators freeze until the window was restored. `backgroundThrottling` is now disabled on all server views so audio processing continues normally in the background.
 
 ---
 
