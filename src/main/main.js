@@ -285,6 +285,7 @@ app.whenReady().then(async () => {
   }
 
   createTray();
+  Menu.setApplicationMenu(buildAppMenu());
 
   // ── Global shortcut: Ctrl+Shift+Home to reset to welcome screen ──
   // This is the escape hatch for users who are soft-locked into a broken server
@@ -1173,6 +1174,58 @@ function recomputeTaskbarBadge() {
   }
   if (anyVisibleUnread) setNotificationBadge();
   else clearNotificationBadge();
+}
+
+// ═══════════════════════════════════════════════════════════
+// Application Menu
+// ═══════════════════════════════════════════════════════════
+
+// Build a custom app menu that routes Reload / DevTools to the active
+// BrowserView instead of the (empty) mainWindow webContents.
+function buildAppMenu() {
+  const isMac = process.platform === 'darwin';
+  return Menu.buildFromTemplate([
+    ...(isMac ? [{ role: 'appMenu' }] : []),
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' }, { role: 'redo' }, { type: 'separator' },
+        { role: 'cut' }, { role: 'copy' }, { role: 'paste' },
+        { role: 'selectAll' },
+      ],
+    },
+    {
+      label: 'View',
+      submenu: [
+        {
+          label: 'Reload',
+          accelerator: 'CmdOrCtrl+R',
+          click() { getActiveContents()?.reload(); },
+        },
+        {
+          label: 'Force Reload',
+          accelerator: 'CmdOrCtrl+Shift+R',
+          click() { getActiveContents()?.reloadIgnoringCache(); },
+        },
+        {
+          label: 'Toggle Developer Tools',
+          accelerator: isMac ? 'Alt+Cmd+I' : 'Ctrl+Shift+I',
+          click() { getActiveContents()?.toggleDevTools(); },
+        },
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+      ],
+    },
+    {
+      label: 'Window',
+      submenu: [
+        { role: 'minimize' },
+        ...(isMac
+          ? [{ role: 'zoom' }, { type: 'separator' }, { role: 'front' }]
+          : [{ role: 'close' }]),
+      ],
+    },
+  ]);
 }
 
 // ═══════════════════════════════════════════════════════════
