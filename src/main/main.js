@@ -869,20 +869,22 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     });
 
     // ── Periodic memory monitoring ──
-    // Checks renderer memory every 30 s.  Soft DOM trim at 300 MB,
-    // hard reload only at 512 MB with a 2 min cooldown to prevent
-    // reload loops on media-heavy channels.
-    const MEM_THRESHOLD_MB = 512;
-    const MEM_WARN_MB      = 300;
+    // Checks renderer memory every 30 s.  Soft DOM trim at 500 MB,
+    // hard reload only at 1536 MB with a 5 min cooldown to prevent
+    // reload loops on media-heavy channels.  Hard reload is skipped
+    // entirely when the user is in voice or screen sharing — reloading
+    // while capturing would abruptly drop the call for all participants.
+    const MEM_THRESHOLD_MB = 1536;
+    const MEM_WARN_MB      = 500;
     const MEM_CHECK_INTERVAL = 30000;
-    const MEM_RELOAD_COOLDOWN = 120000; // 2 min between hard reloads
+    const MEM_RELOAD_COOLDOWN = 300000; // 5 min between hard reloads
     let _memCheckInterval = null;
     let _lastMemReload = 0;           // timestamp of last memory reload
     const _memTrend = [];           // [{ts, mb}] — last 20 readings (~10 min)
     const MEM_TREND_MAX = 20;
     let _memSampleCount = 0;        // total samples taken (for trend log cadence)
     const _startMemCheck = () => {
-      _memCheckInterval = setInterval(() => {
+      _memCheckInterval = setInterval(async () => {
       if (!mainWindow || !serverViews.has(url)) {
         clearInterval(_memCheckInterval);
         return;
@@ -919,11 +921,24 @@ function ensureServerView(serverUrl, { background = false } = {}) {
           if (Date.now() - _lastMemReload < MEM_RELOAD_COOLDOWN) {
             console.warn(`[Haven Desktop] Memory ${Math.round(memMB)} MB — skipping reload (cooldown active), trimming DOM instead`);
           } else {
-            console.warn(`[Haven Desktop] Renderer memory ${Math.round(memMB)} MB exceeds ${MEM_THRESHOLD_MB} MB — clearing caches & reloading`);
-            _lastMemReload = Date.now();
-            try { view.webContents.session.clearCache().catch(() => {}); } catch {}
-            try { view.webContents.loadURL(buildServerAppUrl(url)); } catch {}
-            return; // skip soft trim — we're reloading
+            // Skip hard reload if the user is in an active voice or screen share session.
+            // Reloading mid-call would abruptly kick them (and their screen share partner)
+            // without warning.  Let the soft DOM trim handle it instead.
+            let inVoice = false;
+            try {
+              inVoice = await view.webContents.executeJavaScript(
+                'window._havenApp && (window._havenApp.voice?.inVoice || window._havenApp.voice?.isScreenSharing) ? true : false'
+              ).catch(() => false);
+            } catch { inVoice = false; }
+            if (inVoice) {
+              console.warn(`[Haven Desktop] Memory ${Math.round(memMB)} MB — skipping hard reload because user is in voice/screen share, trimming DOM instead`);
+            } else {
+              console.warn(`[Haven Desktop] Renderer memory ${Math.round(memMB)} MB exceeds ${MEM_THRESHOLD_MB} MB — clearing caches & reloading`);
+              _lastMemReload = Date.now();
+              try { view.webContents.session.clearCache().catch(() => {}); } catch {}
+              try { view.webContents.loadURL(buildServerAppUrl(url)); } catch {}
+              return; // skip soft trim — we're reloading
+            }
           }
         }
 
