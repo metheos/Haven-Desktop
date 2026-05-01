@@ -1514,19 +1514,16 @@ function registerScreenShareHandler() {
       });
 
       // Audio routing for the share:
-      //   We ALWAYS request Electron loopback audio when *any* audio mode
-      //   was requested (per-app, system, or legacy).  The renderer's
-      //   getDisplayMedia override decides at the last moment whether to
-      //   strip that loopback track and replace it with the native PCM
-      //   track.  If native PCM never arrives (e.g. WASAPI process loopback
-      //   API is unavailable on this Windows build, as on issue #5305
-      //   reporters running older 19041 builds without the loopback API)
-      //   the override keeps Electron's loopback track, so the share is
-      //   audible instead of silently dropping audio.  Yes, that means a
-      //   small risk of Haven voice loop in the fallback path — the
-      //   alternative is users wondering why no one can hear their game.
-      //   The renderer toast / share-mode badge will warn them.
-      if (appliedMode === 'none') {
+      //   Native per-app / system-clean capture now takes the no-audio
+      //   callback path on purpose. We start the native pipeline first,
+      //   let getDisplayMedia() resolve with video only, and then the
+      //   renderer adds the native track once the first PCM arrives.
+      //   That avoids the old race where Electron loopback got attached
+      //   immediately, then the override had to guess whether it was safe
+      //   to strip / replace that track before native audio was actually
+      //   flowing. Only pure loopback fallback asks Electron for audio
+      //   up front; 'none' requests no audio at all.
+      if (appliedMode === 'none' || usePerAppAudio) {
         safeCallback({ video: selected });
       } else {
         safeCallback({ video: selected, audio: 'loopback' });
