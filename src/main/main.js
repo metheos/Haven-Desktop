@@ -513,6 +513,7 @@ function ensureServerView(serverUrl, { background = false } = {}) {
         nodeIntegration: false,
         sandbox: false,
         webSecurity: true,
+        spellcheck: true,
         // Prevent Chromium from suspending AudioContext and throttling timers
         // when the window is minimised or loses focus.  Without this the
         // _startAnalyser / _startLocalTalkDetection setIntervals are coalesced
@@ -545,6 +546,7 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     // built-in copy command on some Windows setups. Forward Ctrl/Cmd+C
     // explicitly so selected message text reaches the clipboard.
     view.webContents.on('before-input-event', (event, input) => {
+
       const isCopy = input.type === 'keyDown'
         && !input.isAutoRepeat
         && (input.control || input.meta)
@@ -553,6 +555,32 @@ function ensureServerView(serverUrl, { background = false } = {}) {
       if (!isCopy) return;
       event.preventDefault();
       try { view.webContents.copy(); } catch {}
+    });
+
+    // ── Spell-check suggestions in right-click context menu (#25) ──
+    // Electron doesn't surface suggestions automatically; we build a small
+    // Menu from params.dictionarySuggestions and params.misspelledWord so
+    // users can apply a correction just like they would in a browser.
+    view.webContents.on('context-menu', (_e, params) => {
+      if (!params.misspelledWord) return;
+      const items = [];
+      const suggestions = params.dictionarySuggestions || [];
+      if (suggestions.length) {
+        for (const suggestion of suggestions.slice(0, 6)) {
+          items.push({
+            label: suggestion,
+            click: () => { try { view.webContents.replaceMisspelling(suggestion); } catch {} },
+          });
+        }
+        items.push({ type: 'separator' });
+      }
+      items.push({
+        label: 'Add to Dictionary',
+        click: () => {
+          try { view.webContents.session.addWordToSpellCheckerDictionary(params.misspelledWord); } catch {}
+        },
+      });
+      try { Menu.buildFromTemplate(items).popup({ window: mainWindow }); } catch {}
     });
 
     // ── Page load timeout — if no content after 15 s, offer to go back ──
@@ -1514,19 +1542,16 @@ function registerScreenShareHandler() {
       });
 
       // Audio routing for the share:
-      //   We ALWAYS request Electron loopback audio when *any* audio mode
-      //   was requested (per-app, system, or legacy).  The renderer's
-      //   getDisplayMedia override decides at the last moment whether to
-      //   strip that loopback track and replace it with the native PCM
-      //   track.  If native PCM never arrives (e.g. WASAPI process loopback
-      //   API is unavailable on this Windows build, as on issue #5305
-      //   reporters running older 19041 builds without the loopback API)
-      //   the override keeps Electron's loopback track, so the share is
-      //   audible instead of silently dropping audio.  Yes, that means a
-      //   small risk of Haven voice loop in the fallback path — the
-      //   alternative is users wondering why no one can hear their game.
-      //   The renderer toast / share-mode badge will warn them.
-      if (appliedMode === 'none') {
+      //   Native per-app / system-clean capture now takes the no-audio
+      //   callback path on purpose. We start the native pipeline first,
+      //   let getDisplayMedia() resolve with video only, and then the
+      //   renderer adds the native track once the first PCM arrives.
+      //   That avoids the old race where Electron loopback got attached
+      //   immediately, then the override had to guess whether it was safe
+      //   to strip / replace that track before native audio was actually
+      //   flowing. Only pure loopback fallback asks Electron for audio
+      //   up front; 'none' requests no audio at all. (#30)
+      if (appliedMode === 'none' || usePerAppAudio) {
         safeCallback({ video: selected });
       } else {
         safeCallback({ video: selected, audio: 'loopback' });
