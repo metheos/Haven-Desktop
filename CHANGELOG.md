@@ -1,6 +1,12 @@
 # Haven Desktop Changelog
 
-## v1.4.10
+## v1.4.11
+
+### Fixed
+- **Mic speaking indicator would permanently stop illuminating after extended voice chat sessions.** The indicator was driven by server echo (the `voice-speaking` event relayed back through the server), but if the socket briefly lost voice-room membership during a reconnect or network hiccup, the echo never arrived — and since the client only emits on the `false → true` speech transition, it never recovered. The indicator is now driven directly by the local audio analyser, making it instant and reliable.
+- **Hard page reload during screen sharing kicked the user from their voice session every ~2 minutes.** The memory monitor was set to reload the renderer at 512 MB with a 2-minute cooldown. Screen sharing easily consumes that much memory, triggering a predictable reload cycle. The threshold is now 1536 MB (1.5 GB), the soft-trim threshold is 500 MB, and the reload cooldown is 5 minutes. Additionally, the hard reload is now skipped entirely if the user is currently in voice or screen sharing — only the soft DOM trim runs instead.
+
+---
 
 ### Fixed
 - **Per-app audio: game audio apps sometimes not appearing in the audio picker** (e.g. Terraria). The audio app enumeration was only querying the default console audio endpoint (`eConsole`). Engines like MonoGame/XNA (Terraria), FMOD, and OpenAL can register their audio sessions on a different render endpoint, so those apps were invisible in the picker. Enumeration now iterates all active render endpoints via `IMMDeviceEnumerator::EnumAudioEndpoints`, with per-PID deduplication across endpoints.
