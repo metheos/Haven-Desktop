@@ -1,5 +1,10 @@
 # Haven Desktop Changelog
 
+## v1.4.12
+
+### Fixed
+- **#184: "Screenshare canceled or not supported" error after picking a source.** `desktopCapturer` source IDs aren't stable — Windows can re-enumerate the source set between the moment the picker opens and the moment the renderer attaches the stream, leaving the originally picked ID gone. The handler now re-enumerates at attach time and falls back gracefully (exact ID → same name + display_id → any screen on the same display → first available screen) instead of returning an empty stream and surfacing a generic error.
+
 ## v1.4.11
 
 ### Fixed

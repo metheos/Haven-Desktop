@@ -1352,6 +1352,52 @@ function createTray() {
 // ───────────────────────────────────────────────────────────
 
 function registerScreenShareHandler() {
+  // ── Resolve the user's picker selection at attach time ──
+  // The desktopCapturer source IDs are not stable: between the moment the
+  // picker opened and the moment the renderer accepts the stream, Windows
+  // can re-enumerate and the original ID may no longer exist (issue #184).
+  // Re-enumerate, then try ID match, then by name + display_id, then any
+  // screen on the same display, then the first screen — only fail if there
+  // is literally nothing to share.
+  async function resolveSelectedSource(originalSources, requestedId) {
+    const direct = originalSources.find(s => s.id === requestedId);
+    if (direct) return direct;
+
+    let fresh;
+    try {
+      fresh = await desktopCapturer.getSources({
+        types: ['window', 'screen'],
+        thumbnailSize: { width: 0, height: 0 },
+        fetchWindowIcons: false,
+      });
+    } catch (err) {
+      console.warn(`[ScreenShare] re-enumeration failed: ${err.message}`);
+      return null;
+    }
+
+    const exact = fresh.find(s => s.id === requestedId);
+    if (exact) return exact;
+
+    // Fall back by stable attributes captured at picker time.
+    const original = originalSources.find(s => s.id === requestedId);
+    if (original) {
+      const sameNameAndDisplay = fresh.find(s =>
+        s.name === original.name &&
+        original.display_id && s.display_id === original.display_id
+      );
+      if (sameNameAndDisplay) return sameNameAndDisplay;
+
+      const sameDisplayScreen = original.display_id
+        ? fresh.find(s => s.display_id === original.display_id && s.id.startsWith('screen:'))
+        : null;
+      if (sameDisplayScreen) return sameDisplayScreen;
+    }
+
+    // Last resort — first screen, so the share starts on *something* rather
+    // than throwing a "Screenshare canceled or not supported" at the user.
+    return fresh.find(s => s.id.startsWith('screen:')) || null;
+  }
+
   session.defaultSession.setDisplayMediaRequestHandler(async (request, callback) => {
     let callbackUsed = false;
     const safeCallback = (payload) => {
@@ -1438,8 +1484,16 @@ function registerScreenShareHandler() {
 
       if (result.cancelled) { safeCallback({}); return; }
 
-      const selected = sources.find(s => s.id === result.sourceId);
-      if (!selected) { safeCallback({}); return; }
+      const selected = await resolveSelectedSource(sources, result.sourceId);
+      if (!selected) {
+        // Truly nothing usable — log so we can tell this apart from a normal cancel.
+        console.warn(`[ScreenShare] could not resolve selected source ${result.sourceId} after re-enumeration; aborting`);
+        safeCallback({});
+        return;
+      }
+      if (selected.id !== result.sourceId) {
+        console.log(`[ScreenShare] selected source ID changed between picker and attach: ${result.sourceId} -> ${selected.id} (${selected.name})`);
+      }
 
       // Decide capture path based on picker result.
       //   audioAppPid > 0  → INCLUDE-mode capture of that PID
